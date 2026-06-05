@@ -24,11 +24,16 @@ TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn,formatRelativeTime } from "@/lib/utils";
 import { useWorkflowConfigStore } from "@/store/workflow-config-store";
+<<<<<<< HEAD
 import {
 useWorkflowExecStore,
 type WfRunStatus,
 type WfRunSummary,
 } from "@/store/workflow-exec-store";
+=======
+import { useUnsavedChangesStore } from "@/store/unsaved-changes-store";
+import { cn, formatRelativeTime } from "@/lib/utils";
+>>>>>>> 941049c7b (feat(rbac): workflow ReBAC, run access gates, and DA execution authz)
 import type { WorkflowConfig } from "@/types/workflow-config";
 import { AnimatePresence,motion } from "framer-motion";
 import {
@@ -161,6 +166,7 @@ export function WorkflowSidebar({
   onCollapse,
 }: WorkflowSidebarProps) {
   const router = useRouter();
+  const { toast } = useToast();
   const params = useParams();
   const activeRunId = params?.id as string | undefined;
 
@@ -175,6 +181,7 @@ export function WorkflowSidebar({
     editMode,
     selectedConfigId,
   } = useWorkflowConfigStore();
+  const requestDeferredAction = useUnsavedChangesStore((s) => s.requestDeferredAction);
 
   const [activeTab, setActiveTab] = useState<SidebarTab>("workflows");
   const [tabDirection, setTabDirection] = useState(0); // -1 = left, 1 = right
@@ -240,10 +247,17 @@ export function WorkflowSidebar({
   const switchTab = useCallback(
     (tab: SidebarTab) => {
       if (tab === activeTab) return;
-      setTabDirection(tab === "runs" ? 1 : -1);
-      setActiveTab(tab);
+      const doSwitch = () => {
+        setTabDirection(tab === "runs" ? 1 : -1);
+        setActiveTab(tab);
+      };
+      if (editMode) {
+        requestDeferredAction(doSwitch);
+        return;
+      }
+      doSwitch();
     },
-    [activeTab]
+    [activeTab, editMode, requestDeferredAction],
   );
 
   const handleRefresh = useCallback(async () => {
@@ -257,22 +271,29 @@ export function WorkflowSidebar({
   }, [activeTab, loadConfigs, loadRuns]);
 
   const handleSelectRun = (runId: string) => {
-    router.push(`/workflows/run/${runId}`);
+    requestDeferredAction(() => router.push(`/workflows/run/${runId}`));
   };
 
   const handleEditConfig = (config: WorkflowConfig) => {
-    openEditor("edit", config._id);
-    router.push("/workflows");
+    if (editMode === "edit" && selectedConfigId === config._id) return;
+    requestDeferredAction(() => {
+      openEditor("edit", config._id);
+      router.push("/workflows");
+    });
   };
 
   const handleCloneConfig = (config: WorkflowConfig) => {
-    openEditor("clone", config._id);
-    router.push("/workflows");
+    requestDeferredAction(() => {
+      openEditor("clone", config._id);
+      router.push("/workflows");
+    });
   };
 
   const handleNewConfig = () => {
-    openEditor("new");
-    router.push("/workflows");
+    requestDeferredAction(() => {
+      openEditor("new");
+      router.push("/workflows");
+    });
   };
 
   const handleDeleteConfig = async (config: WorkflowConfig) => {
@@ -304,7 +325,7 @@ export function WorkflowSidebar({
       switchTab("runs");
       router.push(`/workflows/run/${runId}`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to start workflow");
+      toast(err instanceof Error ? err.message : "Failed to start workflow", "error");
     }
   };
 
