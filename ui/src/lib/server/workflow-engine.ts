@@ -17,6 +17,21 @@ import { isToolStartData } from "@/lib/streaming/types";
 import type { WorkflowConfig,WorkflowStep } from "@/types/workflow-config";
 import { flattenStepEntries } from "@/types/workflow-config";
 import { buildTemplateContext,renderPrompt,type StepContext } from "./workflow-templating";
+import { authorize } from "@/lib/authz";
+
+function runOwnerSubject(authHeaders: Record<string, string>): string | null {
+  const auth = authHeaders["Authorization"] ?? authHeaders["authorization"];
+  if (!auth?.startsWith("Bearer ")) return null;
+  const parts = auth.slice(7).split(".");
+  if (parts.length < 2) return null;
+  try {
+    const json = Buffer.from(parts[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    const sub = (JSON.parse(json) as { sub?: unknown }).sub;
+    return typeof sub === "string" && sub.trim() ? sub.trim() : null;
+  } catch {
+    return null;
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Configuration
@@ -255,8 +270,26 @@ async function executeSteps(
     }
   }
 
+  const ownerSub = runOwnerSubject(authHeaders);
+
   for (let i = startFrom; i < steps.length; i++) {
     const step = steps[i];
+
+    // Per-step authorization gate (CAS) — the @subbaksh fix: workflow agent-use
+    // is decided here in the UI server, not in DA. Org-admin bypass + standing
+    // team/global grants apply via CAS. System runs (no owner token) were
+    // already authorized at run start, so they skip this.
+    if (ownerSub) {
+      const decision = await authorize(
+        { subject: { type: "user", id: ownerSub }, resource: { type: "agent", id: step.agent_id }, action: "use" },
+        { correlationId: runId },
+      );
+      if (decision.decision !== "ALLOW") {
+        await markStepFailed(col, runId, i, `Not authorized to use agent "${step.agent_id}" (${decision.reason})`);
+        await markRunFailed(col, runId);
+        return;
+      }
+    }
 
     // Mark step running
     await col.updateOne(
