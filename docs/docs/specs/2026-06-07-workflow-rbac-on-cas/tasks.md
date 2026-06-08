@@ -16,7 +16,7 @@ Implemented on local branch `feat/workflow-rbac-on-cas` (to be split → #1770 C
 - **Phase 1 (PAP)** — `PolicyAdmin` + grant/revoke shipped in CAS core; grants exposed at `/api/admin/authz/grants` (admin-gated + meta-authz "caller manages the resource"), `cas_grant` audit. *Path differs from the planned `/api/authz/v1/grants`.*
 - **Phase 2 (read/use)** — data model from the #1751 merge; `workflow-runs` (read/delete/start) and `workflow-configs` **read-path** re-pointed onto CAS via `filterAccessible` + org-admin bypass. ⚠️ **PUT/DELETE configs stay on the owner/visibility model** — CAS write/delete grants aren't modeled yet.
 - **Phase 3 (per-step gate)** — `authorize(user, step.agent_id, use)` runs in the shared `executeSteps()` loop (covers start **and** resume); DENY fails the step. Tested.
-- **Phase 4 (DA)** — `workflow_execution_authz.py` deleted; DA agrees with CAS via a **mirrored org-admin bypass** in `openfga_authz.py` (⚠️ kept its own OpenFGA check rather than calling CAS over HTTP). Tested.
+- **Phase 4 (DA)** — `workflow_execution_authz.py` deleted; DA agrees with CAS via a mirrored org-admin bypass **and can now delegate the agent-use decision to CAS over HTTP** (opt-in flag `DA_AGENT_USE_VIA_CAS` + `CAS_DECISIONS_URL`; legacy in-process check is the default fallback). Single PDP when enabled. Tested.
 - **Phase 6 (editor UX)** — landed via the #1751 merge.
 - **Phase 7** — `domains/workflow.ts` stub dropped; Access Manager/Diagnostics dead code removed; missing tests added (Phase 3/4 + bearer fallback).
 
@@ -62,7 +62,8 @@ The BFF `executeSteps()` **orchestrates the workflow and invokes agents one step
 
 ### Phase 4 — DA cleanup (addresses @subbaksh #3 + #2)
 - [x] delete `workflow_execution_authz.py` + its test
-- [x] `openfga_authz.py`: mirrored org-admin bypass so DA agrees with CAS *(kept DA's own OpenFGA check; no CAS HTTP call)*
+- [x] `openfga_authz.py`: mirrored org-admin bypass so DA agrees with CAS
+- [x] `openfga_authz.py` delegates the agent-use decision to CAS over HTTP (single PDP) — flag `DA_AGENT_USE_VIA_CAS` + `CAS_DECISIONS_URL`; legacy in-process OpenFGA check is the default fallback
 - [ ] `X-User-Context` reduced to email-only; link #1753
 
 ### Phase 5 — Share / modal via CAS grant API

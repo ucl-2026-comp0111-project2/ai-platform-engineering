@@ -20,8 +20,6 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 from dynamic_agents.auth.token_context import current_traceparent, current_user_token
-from dynamic_agents.models import UserContext
-from dynamic_agents.services.mongo import MongoDBService
 
 logger = logging.getLogger(__name__)
 
@@ -351,13 +349,44 @@ async def _check_org_admin(subject: str) -> bool:
         return bool(response.json().get("allowed"))
 
 
-async def require_agent_use_permission(
-    agent_id: str,
-    *,
-    workflow_config_id: str | None = None,
-    mongo: MongoDBService | None = None,
-    user: UserContext | None = None,
-) -> None:
+def _cas_decisions_url() -> str | None:
+    """BFF/CAS decision endpoint, e.g. http://caipe-ui:3000/api/authz/v1/decisions."""
+    url = os.getenv("CAS_DECISIONS_URL", "").strip()
+    return url or None
+
+
+def _use_cas_authz() -> bool:
+    """Delegate agent-use decisions to CAS (the single PDP) instead of checking
+    OpenFGA in-process. Opt-in: requires both CAS_DECISIONS_URL and the flag, so
+    the legacy direct OpenFGA check stays the default until CAS is wired up."""
+    if not _cas_decisions_url():
+        return False
+    return os.getenv("DA_AGENT_USE_VIA_CAS", "").strip().lower() in {"1", "true", "yes"}
+
+
+async def _check_agent_use_via_cas(subject: str, agent_id: str, bearer: str) -> bool:
+    """Ask CAS whether `subject` may use `agent_id`. We forward the caller's bearer
+    (OBO), so CAS's subject-binding (caller == subject) is satisfied, and CAS
+    evaluates the OpenFGA capability AND the org-admin bypass — DA does neither.
+    A DENY is a 200 with `decision: DENY`; any non-200 raises so the caller fails
+    closed (503), matching the direct-OpenFGA path's unavailability behavior."""
+    headers = {"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}
+    traceparent = current_traceparent.get()
+    if traceparent:
+        headers["traceparent"] = traceparent
+    body = {
+        "subject": {"type": "user", "id": subject},
+        "resource": {"type": "agent", "id": agent_id},
+        "action": "use",
+    }
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.post(_cas_decisions_url(), headers=headers, json=body)
+    if response.status_code != 200:
+        raise RuntimeError(f"CAS decision endpoint returned HTTP {response.status_code}")
+    return response.json().get("decision") == "ALLOW"
+
+
+async def require_agent_use_permission(agent_id: str) -> None:
     """Require the current bearer token subject to have can_use on an agent."""
     if not _is_valid_openfga_id(agent_id):
         _raise_authz(
@@ -408,11 +437,15 @@ async def require_agent_use_permission(
             trace_ctx_token = None
 
     try:
-        allowed = False
-        for candidate in principal_candidates:
-            allowed = await _check_agent_use(candidate, agent_id)
-            if allowed:
-                break
+        if _use_cas_authz():
+            # Single PDP: CAS evaluates the capability AND the org-admin bypass.
+            allowed = await _check_agent_use_via_cas(subject, agent_id, token)
+        else:
+            allowed = False
+            for candidate in principal_candidates:
+                allowed = await _check_agent_use(candidate, agent_id)
+                if allowed:
+                    break
     except Exception as exc:
         logger.warning("OpenFGA agent-use check failed for agent=%s: %s", agent_id, exc)
         _log_openfga_rebac_audit(
@@ -450,9 +483,8 @@ async def require_agent_use_permission(
 
     # Org-admin bypass — mirrors the BFF/CAS. Workflow agent-use is now decided
     # in the UI server (CAS); DA no longer reads workflow_configs from Mongo.
-    # `workflow_config_id`/`mongo`/`user` are accepted for caller compatibility
-    # but unused.
-    if not allowed and _org_admin_bypass_enabled() and subject:
+    # Legacy path only: in CAS mode the decision endpoint already applied the bypass.
+    if not _use_cas_authz() and not allowed and _org_admin_bypass_enabled() and subject:
         try:
             allowed = await _check_org_admin(subject)
         except Exception as exc:  # noqa: BLE001

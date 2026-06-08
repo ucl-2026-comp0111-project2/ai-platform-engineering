@@ -399,3 +399,132 @@ async def test_check_org_admin_posts_can_manage_organization(monkeypatch):
         "relation": "can_manage",
         "object": "organization:acme",
     }
+
+
+# ── Delegate agent-use decisions to CAS over HTTP (flag-gated; single PDP) ──────
+
+
+class _CasResponse:
+    def __init__(self, status_code: int, payload: dict | None = None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _cas_client(captured: list, response: "_CasResponse"):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url: str, **kwargs):
+            captured.append((url, kwargs.get("headers"), kwargs.get("json")))
+            return response
+
+    return FakeClient
+
+
+@pytest.mark.asyncio
+async def test_agent_use_delegates_to_cas_when_enabled(monkeypatch):
+    """Flag on: DA asks CAS for the decision and does NOT check OpenFGA itself."""
+    from dynamic_agents.auth import openfga_authz
+
+    monkeypatch.setenv("CAS_DECISIONS_URL", "http://caipe-ui:3000/api/authz/v1/decisions")
+    monkeypatch.setenv("DA_AGENT_USE_VIA_CAS", "true")
+    posts: list = []
+    monkeypatch.setattr(
+        openfga_authz.httpx, "AsyncClient", _cas_client(posts, _CasResponse(200, {"decision": "ALLOW"}))
+    )
+
+    async def must_not_run(*a, **k):
+        raise AssertionError("DA must not check OpenFGA directly in CAS mode")
+
+    monkeypatch.setattr(openfga_authz, "_check_agent_use", must_not_run)
+    monkeypatch.setattr(openfga_authz, "_check_org_admin", must_not_run)
+
+    token_ref = current_user_token.set(_fake_jwt({"sub": "alice-sub"}))
+    try:
+        await openfga_authz.require_agent_use_permission("agent-1")  # no raise
+    finally:
+        current_user_token.reset(token_ref)
+
+    assert posts
+    url, headers, body = posts[-1]
+    assert url == "http://caipe-ui:3000/api/authz/v1/decisions"
+    assert headers["Authorization"].startswith("Bearer ")
+    assert body == {
+        "subject": {"type": "user", "id": "alice-sub"},
+        "resource": {"type": "agent", "id": "agent-1"},
+        "action": "use",
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_use_via_cas_denies_with_403(monkeypatch):
+    from dynamic_agents.auth import openfga_authz
+
+    monkeypatch.setenv("CAS_DECISIONS_URL", "http://cas/decisions")
+    monkeypatch.setenv("DA_AGENT_USE_VIA_CAS", "1")
+    monkeypatch.setattr(
+        openfga_authz.httpx, "AsyncClient", _cas_client([], _CasResponse(200, {"decision": "DENY"}))
+    )
+
+    token_ref = current_user_token.set(_fake_jwt({"sub": "alice-sub"}))
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await openfga_authz.require_agent_use_permission("agent-1")
+    finally:
+        current_user_token.reset(token_ref)
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["reason"] == "pdp_denied"
+
+
+@pytest.mark.asyncio
+async def test_agent_use_via_cas_fails_closed_on_non_200(monkeypatch):
+    """Any non-200 from CAS (e.g. 503) denies via 503 — fail closed."""
+    from dynamic_agents.auth import openfga_authz
+
+    monkeypatch.setenv("CAS_DECISIONS_URL", "http://cas/decisions")
+    monkeypatch.setenv("DA_AGENT_USE_VIA_CAS", "yes")
+    monkeypatch.setattr(openfga_authz.httpx, "AsyncClient", _cas_client([], _CasResponse(503)))
+
+    token_ref = current_user_token.set(_fake_jwt({"sub": "alice-sub"}))
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await openfga_authz.require_agent_use_permission("agent-1")
+    finally:
+        current_user_token.reset(token_ref)
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail["reason"] == "pdp_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_agent_use_uses_legacy_openfga_when_flag_off(monkeypatch):
+    """URL set but flag off → DA keeps checking OpenFGA directly (no CAS call)."""
+    from dynamic_agents.auth import openfga_authz
+
+    monkeypatch.setenv("CAS_DECISIONS_URL", "http://cas/decisions")
+    monkeypatch.delenv("DA_AGENT_USE_VIA_CAS", raising=False)
+    calls: list = []
+
+    async def fake_check(subject: str, agent_id: str) -> bool:
+        calls.append((subject, agent_id))
+        return True
+
+    monkeypatch.setattr(openfga_authz, "_check_agent_use", fake_check)
+    token_ref = current_user_token.set(_fake_jwt({"sub": "alice-sub"}))
+    try:
+        await openfga_authz.require_agent_use_permission("agent-1")
+    finally:
+        current_user_token.reset(token_ref)
+
+    assert calls == [("alice-sub", "agent-1")]
