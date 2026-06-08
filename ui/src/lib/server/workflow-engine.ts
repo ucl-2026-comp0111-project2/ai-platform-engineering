@@ -19,7 +19,7 @@ import { flattenStepEntries } from "@/types/workflow-config";
 import { buildTemplateContext,renderPrompt,type StepContext } from "./workflow-templating";
 import { authorize } from "@/lib/authz";
 
-function runOwnerSubject(authHeaders: Record<string, string>): string | null {
+export function runOwnerSubject(authHeaders: Record<string, string>): string | null {
   const auth = authHeaders["Authorization"] ?? authHeaders["authorization"];
   if (!auth?.startsWith("Bearer ")) return null;
   const parts = auth.slice(7).split(".");
