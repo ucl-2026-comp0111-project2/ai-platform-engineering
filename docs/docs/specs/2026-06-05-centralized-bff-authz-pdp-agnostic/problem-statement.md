@@ -600,7 +600,7 @@ Defined in `workflow-config-rebac.ts`:
 - [PDP coverage audit](../../security/rbac/pdp-coverage-audit.md)
 - [RBAC architecture](../../security/rbac/architecture.md)
 - [Chat execution authz contract](../2026-05-16-dynamic-agent-pdp-gate/contracts/chat-execution-authz.md)
-- [Unified shareable resource RBAC](../2026-06-03-unified-shareable-resource-rbac/)
+- [Unified shareable resource RBAC](../2026-06-03-unified-shareable-resource-rbac/spec.md)
 - [RAG thin PEP plan](../2026-05-19-rag-thin-pep-openfga/plan.md)
 - [ReBAC policy API contract](../2026-05-11-identity-group-rebac/contracts/rebac-policy-api.md)
 

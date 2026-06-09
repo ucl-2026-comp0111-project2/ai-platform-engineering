@@ -5,8 +5,8 @@ import { Input } from "@/components/ui/input";
 import { TeamMultiPicker, type TeamPickerOption } from "@/components/ui/team-picker";
 import { cn } from "@/lib/utils";
 import type { WorkflowConfigVisibility } from "@/types/workflow-config";
-import { ArrowLeft,Download,Globe,Lock,Play,Save,Trash2,Upload,Users } from "lucide-react";
-import React,{ useEffect,useRef,useState } from "react";
+import { ArrowLeft,Copy,Download,Globe,Lock,Play,Save,Trash2,Upload,Users } from "lucide-react";
+import React,{ useEffect,useMemo,useRef,useState } from "react";
 import YAML from "yaml";
 
 interface Team {
