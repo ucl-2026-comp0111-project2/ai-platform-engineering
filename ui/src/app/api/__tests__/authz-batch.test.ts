@@ -30,36 +30,55 @@ beforeEach(() => {
   mockGetAuth.mockResolvedValue({ session: { sub: "alice" } });
 });
 
-it("returns one decision per id, preserving input order", async () => {
+it("returns one decision per id with retriable flag, preserving input order", async () => {
   mockAuthorizeMany.mockResolvedValue(
     new Map([
-      ["a", { decision: "ALLOW", reason: "OK" }],
-      ["b", { decision: "DENY", reason: "NO_CAPABILITY" }],
+      ["a", { decision: "ALLOW", reason: "OK", retriable: false }],
+      ["b", { decision: "DENY", reason: "NO_CAPABILITY", retriable: false }],
     ]),
   );
   const res = await POST(
     post({ subject: { type: "user", id: "alice" }, action: "discover", resource_type: "agent", ids: ["a", "b"] }),
   );
   expect(res.status).toBe(200);
-  expect(await res.json()).toEqual({
-    results: [
-      { id: "a", decision: "ALLOW", reason: "OK" },
-      { id: "b", decision: "DENY", reason: "NO_CAPABILITY" },
-    ],
-  });
+  const body = await res.json();
+  expect(body.results).toEqual([
+    { id: "a", decision: "ALLOW", reason: "OK", retriable: false },
+    { id: "b", decision: "DENY", reason: "NO_CAPABILITY", retriable: false },
+  ]);
+  expect(body.degraded).toBeUndefined();
 });
 
-it("emits a fail-closed result for any id missing from the engine response", async () => {
-  // engine returns results for only one of two ids
-  mockAuthorizeMany.mockResolvedValue(new Map([["a", { decision: "ALLOW", reason: "OK" }]]));
+it("emits degraded+retriable at top-level when any id is AUTHZ_UNAVAILABLE", async () => {
+  // engine returns results for only one of two ids (the other is fail-closed)
+  mockAuthorizeMany.mockResolvedValue(new Map([["a", { decision: "ALLOW", reason: "OK", retriable: false }]]));
   const res = await POST(
     post({ subject: { type: "user", id: "alice" }, action: "discover", resource_type: "agent", ids: ["a", "b"] }),
   );
   const body = await res.json();
+  expect(res.status).toBe(200);
   expect(body.results).toEqual([
-    { id: "a", decision: "ALLOW", reason: "OK" },
-    { id: "b", decision: "DENY", reason: "AUTHZ_UNAVAILABLE" },
+    { id: "a", decision: "ALLOW", reason: "OK", retriable: false },
+    { id: "b", decision: "DENY", reason: "AUTHZ_UNAVAILABLE", retriable: true },
   ]);
+  expect(body.degraded).toBe(true);
+  expect(body.retriable).toBe(true);
+});
+
+it("emits degraded+retriable when the engine returns AUTHZ_UNAVAILABLE for an id", async () => {
+  mockAuthorizeMany.mockResolvedValue(
+    new Map([
+      ["a", { decision: "ALLOW", reason: "OK", retriable: false }],
+      ["b", { decision: "DENY", reason: "AUTHZ_UNAVAILABLE", retriable: true }],
+    ]),
+  );
+  const res = await POST(
+    post({ subject: { type: "user", id: "alice" }, action: "discover", resource_type: "agent", ids: ["a", "b"] }),
+  );
+  const body = await res.json();
+  expect(body.degraded).toBe(true);
+  expect(body.retriable).toBe(true);
+  expect(body.results[1].retriable).toBe(true);
 });
 
 it("rejects an empty id list with 400", async () => {

@@ -1,56 +1,24 @@
-// assisted-by claude code claude-opus-4-8
+// assisted-by claude code claude-sonnet-4-6
 //
-// Standalone OpenFGA adapter for CAS. Intentionally does NOT import from
-// lib/rbac/** — the two silos share the same OPENFGA_HTTP env var but own
-// separate transport instances. Duplication of the ~25-line transport is
-// deliberate; the ESLint boundary rule enforces the separation so each
-// surface can migrate independently.
+// Standalone OpenFGA adapter for CAS. Transport (HTTP client, store-id cache,
+// circuit breaker) is private to this silo. Vocabulary (action→relation maps)
+// is imported from lib/rbac/tuple-builders — the canonical source — so CAS
+// can never silently drift from the OpenFGA model used by the rest of the BFF.
 
 import type {
   Action,
   AuthorizeRequest,
   AuthorizeResult,
+  Grantee,
+  GrantIntent,
   Resource,
   ResourceType,
   Subject,
 } from "../contract";
-import type { PolicyEngine } from "../engine";
+import type { PolicyAdmin, PolicyEngine } from "../engine";
 import { BoundedTtlCache } from "../cache";
 import { getReasonMeta } from "../reasons";
-
-// ─── Action → OpenFGA check-relation map ─────────────────────────────────────
-// Mirrors lib/rbac/tuple-builders.ts ACTION_TO_CHECK_RELATION. Kept in sync
-// manually; the lint boundary prevents importing the original across silos.
-const ACTION_TO_CHECK_RELATION: Record<Action, string> = {
-  discover:        "can_discover",
-  read:            "can_read",
-  "read-metadata": "can_read_metadata",
-  use:             "can_use",
-  write:           "can_write",
-  create:          "can_manage",
-  manage:          "can_manage",
-  share:           "can_share",
-  delete:          "can_delete",
-  ingest:          "can_ingest",
-  call:            "can_call",
-  invoke:          "can_invoke",
-  audit:           "can_audit",
-};
-
-// CAS ResourceType → OpenFGA object-type string.
-const RESOURCE_TO_OPENFGA_TYPE: Record<ResourceType, string> = {
-  agent:          "agent",
-  skill:          "skill",
-  mcp_tool:       "mcp_tool",
-  knowledge_base: "knowledge_base",
-  data_source:    "data_source",
-  task:           "task",
-  slack_channel:  "slack_channel",
-  webex_space:    "webex_space",
-  organization:   "organization",
-  team:           "team",
-  conversation:   "conversation",
-};
+import { openFgaRelation, openFgaCheckRelation } from "@/lib/rbac/tuple-builders";
 
 // ─── Transport ────────────────────────────────────────────────────────────────
 
@@ -227,10 +195,9 @@ function deny(reason: AuthorizeResult["reason"] = "NO_CAPABILITY"): AuthorizeRes
 async function runCheck(req: AuthorizeRequest): Promise<AuthorizeResult> {
   if (!circuitAllows()) return deny("AUTHZ_UNAVAILABLE");
 
-  const relation = ACTION_TO_CHECK_RELATION[req.action];
-  const objectType = RESOURCE_TO_OPENFGA_TYPE[req.resource.type];
+  const relation = openFgaCheckRelation(req.action);
   const user = `${req.subject.type}:${req.subject.id}`;
-  const object = `${objectType}:${req.resource.id}`;
+  const object = `${req.resource.type}:${req.resource.id}`;
 
   try {
     const storeId = await resolveStoreId();
@@ -285,6 +252,70 @@ export function createOpenFgaEngine(): PolicyEngine {
   };
 }
 
+
+// ─── Admin / PAP (writes) ─────────────────────────────────────────────────────
+
+interface FgaTuple {
+  user: string;
+  relation: string;
+  object: string;
+}
+
+function granteeRef(g: Grantee): string {
+  switch (g.type) {
+    case "user":
+      return `user:${g.id}`;
+    case "service_account":
+      return `service_account:${g.id}`;
+    case "team":
+      return `team:${g.id}#member`;
+    case "everyone":
+      return "user:*";
+  }
+}
+
+function grantTuple(intent: GrantIntent): FgaTuple {
+  return {
+    user: granteeRef(intent.grantee),
+    relation: openFgaRelation(intent.capability),
+    object: `${intent.resource.type}:${intent.resource.id}`,
+  };
+}
+
+async function fgaWrite(storeId: string, writes: FgaTuple[], deletes: FgaTuple[]): Promise<void> {
+  const body = {
+    ...(writes.length ? { writes: { tuple_keys: writes } } : {}),
+    ...(deletes.length ? { deletes: { tuple_keys: deletes } } : {}),
+  };
+  const res = await fetch(`${baseUrl()}/stores/${storeId}/write`, {
+    method: "POST",
+    headers: fgaHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    // Idempotent: writing an existing tuple / deleting an absent one is a no-op.
+    if (res.status === 400 && /already exist|does not exist|duplicate/i.test(text)) return;
+    throw new Error(`OpenFGA write failed: ${res.status} ${text.slice(0, 200)}`);
+  }
+}
+
+export function createOpenFgaAdmin(): PolicyAdmin {
+  return {
+    async grant(intent: GrantIntent): Promise<void> {
+      const storeId = await resolveStoreId();
+      await fgaWrite(storeId, [grantTuple(intent)], []);
+      decisionCache.clear(); // the graph changed — drop cached decisions
+    },
+    async revoke(intent: GrantIntent): Promise<void> {
+      const storeId = await resolveStoreId();
+      await fgaWrite(storeId, [], [grantTuple(intent)]);
+      decisionCache.clear();
+    },
+  };
+}
+
+
 /**
  * Debug describe for the admin /explain endpoint — the ONLY place OpenFGA
  * vocabulary (relation strings, store id, tuple shape) is exposed. Reuses
@@ -299,9 +330,9 @@ export function describeFgaCheck(req: AuthorizeRequest): {
 } {
   return {
     engine: "openfga",
-    relation: ACTION_TO_CHECK_RELATION[req.action],
+    relation: openFgaCheckRelation(req.action),
     user: `${req.subject.type}:${req.subject.id}`,
-    object: `${RESOURCE_TO_OPENFGA_TYPE[req.resource.type]}:${req.resource.id}`,
+    object: `${req.resource.type}:${req.resource.id}`,
     store: process.env.OPENFGA_STORE_ID?.trim() || cachedStoreId || "(resolved at boot)",
   };
 }

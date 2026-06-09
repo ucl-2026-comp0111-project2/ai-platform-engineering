@@ -67,12 +67,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const results = await authorizeMany(subject, action, resourceType, ids, ctx);
     const out = ids.map((id) => {
       const r = results.get(id);
-      return r
-        ? { id, decision: r.decision, reason: r.reason }
-        : { id, decision: "DENY" as const, reason: "AUTHZ_UNAVAILABLE" as const };
+      const result = r ?? { decision: "DENY" as const, reason: "AUTHZ_UNAVAILABLE" as const, retriable: true };
+      return { id, decision: result.decision, reason: result.reason, retriable: result.retriable ?? false };
     });
 
-    return NextResponse.json({ results: out }, { status: 200 });
+    // Surface PDP outage so callers can distinguish "no access" from "PDP down".
+    const degraded = out.some((r) => r.reason === "AUTHZ_UNAVAILABLE");
+    return NextResponse.json(
+      { results: out, ...(degraded ? { degraded: true, retriable: true } : {}) },
+      { status: 200 },
+    );
   } catch (err) {
     if (err instanceof HttpAuthzError) return metaErrorResponse(err);
     throw err;
