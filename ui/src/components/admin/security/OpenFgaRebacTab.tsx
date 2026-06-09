@@ -135,7 +135,7 @@ interface GraphEdge {
 const ALL_RELATIONSHIPS_SCOPE = "__all_relationships__";
 const DEFAULT_GRAPH_LAYER: GraphLayer = "tuples";
 const DEFAULT_OPENFGA_TAB = "tuples";
-const OPENFGA_TABS = new Set(["tuples", "graph", "access", "baseline", "diagnostics"]);
+const OPENFGA_TABS = new Set(["tuples", "graph", "baseline", "diagnostics"]);
 const ACTION_TO_BASE_RELATION: Record<UniversalRebacResourceAction, string> = {
   discover: "reader",
   read: "reader",
@@ -687,7 +687,6 @@ export function OpenFgaRebacTab({ isAdmin }: { isAdmin: boolean }) {
         <TabsList>
           <TabsTrigger value="tuples" onClick={() => setActiveTab("tuples")}>OpenFGA Tuples</TabsTrigger>
           <TabsTrigger value="graph" onClick={() => setActiveTab("graph")}>Policy Graph</TabsTrigger>
-          <TabsTrigger value="access" onClick={() => setActiveTab("access")}>Access Manager</TabsTrigger>
           <TabsTrigger value="baseline" onClick={() => setActiveTab("baseline")}>Default FGA Grants</TabsTrigger>
           <TabsTrigger value="diagnostics" onClick={() => setActiveTab("diagnostics")}>Diagnostics</TabsTrigger>
         </TabsList>
@@ -706,51 +705,6 @@ export function OpenFgaRebacTab({ isAdmin }: { isAdmin: boolean }) {
             </CardHeader>
             <CardContent>
               <UserBaselineDiagnosticsPanel />
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="access">
-          <Card>
-            <CardHeader>
-              <CardTitle>Access Manager</CardTitle>
-              <CardDescription>
-                Select any catalog-backed subject and resource, check the derived permission, then grant or revoke it through a validated change set.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <AccessCheckForm
-                catalog={catalog}
-                subjectType={accessSubjectType}
-                subjectId={accessSubjectId}
-                subjectRelation={accessSubjectRelation}
-                resourceType={accessResourceType}
-                resourceId={accessResourceId}
-                action={accessAction}
-                onSubjectType={setAccessSubjectType}
-                onSubjectId={setAccessSubjectId}
-                onSubjectRelation={setAccessSubjectRelation}
-                onResourceType={setAccessResourceType}
-                onResourceId={setAccessResourceId}
-                onAction={setAccessAction}
-              />
-              {selectedAccessRelationship && <AccessPreview relationship={selectedAccessRelationship} />}
-              <AccessChangeSetPreview
-                relationship={selectedAccessRelationship}
-                allowed={checkResult}
-                canMutate={isAdmin}
-              />
-              <RebacAccessChecker
-                relationship={selectedAccessRelationship}
-                allowed={checkResult}
-                busy={busy}
-                canGrant={isAdmin}
-                onCheck={checkAccess}
-                onGrant={grantSelectedAccess}
-                onRevoke={revokeSelectedAccess}
-              />
-              {!isAdmin && <p className="text-sm text-muted-foreground">You can inspect ReBAC, but only admins can mutate tuples.</p>}
-              <OpenFgaPermissionCheatsheet />
             </CardContent>
           </Card>
         </TabsContent>
