@@ -8,20 +8,23 @@
 jest.mock("../engines/openfga", () => {
   const check = jest.fn();
   const batchCheck = jest.fn();
+  const grant = jest.fn();
+  const revoke = jest.fn();
   return {
     __esModule: true,
     createOpenFgaEngine: () => ({ check, batchCheck }),
+    createOpenFgaAdmin: () => ({ grant, revoke }),
     describeFgaCheck: jest.fn(),
     getEngineStats: jest.fn(() => ({ circuitState: "closed", cacheSize: 0, cacheHits: 0, cacheMisses: 0, cacheHitRatio: 0 })),
-    __mocks: { check, batchCheck },
+    __mocks: { check, batchCheck, grant, revoke },
   };
 });
 // Audit is a no-op in tests (Mongo unconfigured).
 jest.mock("@/lib/mongodb", () => ({ getCollection: jest.fn(), isMongoDBConfigured: false }));
 
 import * as openfgaEngine from "../engines/openfga";
-const { check: mockCheck, batchCheck: mockBatch } = (
-  openfgaEngine as unknown as { __mocks: { check: jest.Mock; batchCheck: jest.Mock } }
+const { check: mockCheck, batchCheck: mockBatch, grant: mockGrant, revoke: mockRevoke } = (
+  openfgaEngine as unknown as { __mocks: { check: jest.Mock; batchCheck: jest.Mock; grant: jest.Mock; revoke: jest.Mock } }
 ).__mocks;
 
 import {
@@ -29,6 +32,8 @@ import {
   authorizeMany,
   authorizeOrThrow,
   filterAccessible,
+  grant,
+  revoke,
   AuthzDeniedError,
   describeFgaCheck,
   getEngineStats,
@@ -82,6 +87,19 @@ describe("authorizeMany", () => {
     const r = await authorizeMany({ type: "user", id: "u" }, "read", "task", ["a"]);
     expect(r.get("a")?.decision).toBe("ALLOW");
     expect(mockBatch).toHaveBeenCalledWith({ type: "user", id: "u" }, "read", "task", ["a"]);
+  });
+});
+
+describe("grant / revoke (PAP)", () => {
+  it("grant delegates to the admin engine", async () => {
+    const intent = { resource: { type: "agent" as const, id: "pe" }, grantee: { type: "team" as const, id: "eng" }, capability: "use" as const };
+    await grant(intent);
+    expect(mockGrant).toHaveBeenCalledWith(intent, undefined);
+  });
+  it("revoke delegates to the admin engine", async () => {
+    const intent = { resource: { type: "agent" as const, id: "pe" }, grantee: { type: "everyone" as const }, capability: "use" as const };
+    await revoke(intent);
+    expect(mockRevoke).toHaveBeenCalledWith(intent, undefined);
   });
 });
 

@@ -9,12 +9,13 @@ import type {
   AuthorizeRequest,
   AuthorizeResult,
   DecisionContext,
+  GrantIntent,
   ResourceType,
   Subject,
 } from "./contract";
 import { compose } from "./compose";
 import { emitDecisionAudit } from "./audit";
-import { createOpenFgaEngine } from "./engines/openfga";
+import { createOpenFgaEngine, createOpenFgaAdmin } from "./engines/openfga";
 import { workflowDelegationPreCheck } from "./domains/workflow";
 
 // ─── Singleton engine (module-level, reused across requests) ──────────────────
@@ -22,6 +23,8 @@ import { workflowDelegationPreCheck } from "./domains/workflow";
 const engine = compose(createOpenFgaEngine(), {
   preCheck: async (req) => workflowDelegationPreCheck(req),
 });
+
+const admin = createOpenFgaAdmin();
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -84,6 +87,16 @@ export async function filterAccessible(
   return ids.filter((id) => results.get(id)?.decision === "ALLOW");
 }
 
+// ─── Grant / Revoke (PAP) ─────────────────────────────────────────────────────
+
+export async function grant(intent: GrantIntent, ctx?: DecisionContext): Promise<void> {
+  await admin.grant(intent, ctx);
+}
+
+export async function revoke(intent: GrantIntent, ctx?: DecisionContext): Promise<void> {
+  await admin.revoke(intent, ctx);
+}
+
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 export class AuthzDeniedError extends Error {
@@ -106,6 +119,8 @@ export type {
   AuthorizeResult,
   DecisionContext,
   DecisionValue,
+  Grantee,
+  GrantIntent,
   ReasonCode,
   Resource,
   ResourceType,

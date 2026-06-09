@@ -1,6 +1,6 @@
 // assisted-by claude code claude-sonnet-4-6
 
-import type { Action, AuthorizeRequest, AuthorizeResult, ResourceType, Subject } from "./contract";
+import type { Action, AuthorizeRequest, AuthorizeResult, GrantIntent, ResourceType, Subject } from "./contract";
 
 export interface PolicyEngine {
   check(req: AuthorizeRequest): Promise<AuthorizeResult>;
@@ -10,4 +10,9 @@ export interface PolicyEngine {
     resourceType: ResourceType,
     ids: string[],
   ): Promise<Map<string, AuthorizeResult>>;
+}
+
+export interface PolicyAdmin {
+  grant(intent: GrantIntent): Promise<void>;
+  revoke(intent: GrantIntent): Promise<void>;
 }

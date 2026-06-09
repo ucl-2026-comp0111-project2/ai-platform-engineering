@@ -74,3 +74,20 @@ export interface DecisionContext {
   traceId?: string;
   spanId?: string;
 }
+
+// ─── Grant / Revoke (PAP) ─────────────────────────────────────────────────────
+
+export type GranteeType = "user" | "service_account" | "team" | "everyone";
+
+export type Grantee =
+  | { type: "user"; id: string }
+  | { type: "service_account"; id: string }
+  | { type: "team"; id: string }
+  | { type: "everyone" };
+
+export interface GrantIntent {
+  resource: Resource;
+  grantee: Grantee;
+  /** The capability to grant — must be a valid Action. */
+  capability: Action;
+}
