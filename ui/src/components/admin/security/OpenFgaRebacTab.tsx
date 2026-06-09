@@ -58,7 +58,6 @@ import { usePathname,useRouter,useSearchParams } from "next/navigation";
 import { memo,useCallback,useEffect,useMemo,useState } from "react";
 import { BaselineFgaProfilePanel } from "../rebac/BaselineFgaProfilePanel";
 import { PolicyChangeSetDiff } from "../rebac/PolicyChangeSetDiff";
-import { RebacAccessChecker } from "../rebac/RebacAccessChecker";
 import { RebacGraphFilters,type RebacGraphUserOption } from "../rebac/RebacGraphFilters";
 import { UserBaselineDiagnosticsPanel } from "../rebac/UserBaselineDiagnosticsPanel";
 
