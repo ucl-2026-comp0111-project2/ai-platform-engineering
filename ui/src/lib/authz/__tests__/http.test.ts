@@ -6,8 +6,12 @@
  */
 
 const mockAuthorize = jest.fn();
+const mockEmitGrantAudit = jest.fn();
 jest.mock("../index", () => ({
   authorize: (...args: unknown[]) => mockAuthorize(...args),
+}));
+jest.mock("../audit", () => ({
+  emitGrantAudit: (...args: unknown[]) => mockEmitGrantAudit(...args),
 }));
 
 import {
@@ -62,6 +66,16 @@ describe("decisionContext", () => {
   });
   it("leaves tenant undefined when there is no org claim", () => {
     expect(decisionContext({ sub: "x" }).tenantId).toBeUndefined();
+  });
+  it("threads caller and x-correlation-id from the request", () => {
+    const caller = { type: "user" as const, id: "alice" };
+    const req = new Request("http://localhost", { headers: { "x-correlation-id": "req-99" } });
+    const ctx = decisionContext({ org: "acme" }, caller, req);
+    expect(ctx).toMatchObject({
+      tenantId: "acme",
+      correlationId: "req-99",
+      caller: { type: "user", id: "alice" },
+    });
   });
 });
 
@@ -177,13 +191,32 @@ describe("grant parsing", () => {
 
 describe("requireManage (grant meta-authz)", () => {
   const caller: Caller = { type: "user", id: "admin" };
+  const ctx = { caller: { type: "user" as const, id: "admin" }, tenantId: "acme", correlationId: "c-1" };
+  const intent = {
+    resource: { type: "agent" as const, id: "pe" },
+    grantee: { type: "team" as const, id: "eng" },
+    capability: "use" as const,
+  };
+
   it("passes when the caller can manage the resource", async () => {
     mockAuthorize.mockResolvedValue({ decision: "ALLOW", reason: "OK" });
     await expect(requireManage(caller, { type: "agent", id: "pe" }, {})).resolves.toBeUndefined();
     expect(mockAuthorize).toHaveBeenCalledWith(expect.objectContaining({ action: "manage", resource: { type: "agent", id: "pe" } }), expect.anything());
+    expect(mockEmitGrantAudit).not.toHaveBeenCalled();
   });
   it("throws 403 when the caller cannot manage the resource", async () => {
     mockAuthorize.mockResolvedValue({ decision: "DENY", reason: "NO_CAPABILITY" });
     await expect(requireManage(caller, { type: "agent", id: "pe" }, {})).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(mockEmitGrantAudit).not.toHaveBeenCalled();
+  });
+  it("audits failed grant attempts when meta-authz denies", async () => {
+    mockAuthorize.mockResolvedValue({ decision: "DENY", reason: "NO_CAPABILITY" });
+    await expect(
+      requireManage(caller, intent.resource, ctx, { operation: "grant", intent }),
+    ).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
+    expect(mockEmitGrantAudit).toHaveBeenCalledWith("grant", intent, ctx, {
+      outcome: "error",
+      reasonCode: "NO_CAPABILITY",
+    });
   });
 });

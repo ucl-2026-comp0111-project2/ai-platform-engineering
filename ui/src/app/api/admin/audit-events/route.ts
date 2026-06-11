@@ -11,7 +11,7 @@ import { NextRequest,NextResponse } from "next/server";
 
 const COLLECTION = "audit_events";
 
-const VALID_TYPES: AuditEventType[] = ["auth", "tool_action", "agent_delegation", "openfga_rebac", "cas_decision"];
+const VALID_TYPES: AuditEventType[] = ["auth", "tool_action", "agent_delegation", "openfga_rebac", "cas_decision", "cas_grant"];
 const VALID_OUTCOMES: UnifiedAuditOutcome[] = ["allow", "deny", "success", "error"];
 
 interface AuditEventDocument {
@@ -36,6 +36,10 @@ interface AuditEventDocument {
   trace_id?: string;
   span_id?: string;
   trace_url?: string;
+  actor_hash?: string;
+  caller_ref?: string;
+  grantee_ref?: string;
+  operation?: "grant" | "revoke";
 }
 
 function normalizeAuditSource(source: string): UnifiedAuditEvent["source"] {
@@ -78,6 +82,10 @@ function documentToEvent(doc: AuditEventDocument): UnifiedAuditEvent {
     resource_ref: doc.resource_ref,
     pdp: doc.pdp,
     source: normalizeAuditSource(doc.source),
+    actor_hash: doc.actor_hash,
+    caller_ref: doc.caller_ref,
+    grantee_ref: doc.grantee_ref,
+    operation: doc.operation,
     trace_id: doc.trace_id,
     span_id: doc.span_id,
   };

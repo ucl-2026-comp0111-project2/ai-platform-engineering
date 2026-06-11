@@ -1,4 +1,5 @@
 "use client";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card,CardContent,CardDescription,CardHeader,CardTitle } from "@/components/ui/card";
@@ -10,15 +11,17 @@ ChevronLeft,
 ChevronRight,
 ChevronUp,
 Clock,
-GitBranch,
-Loader2,
-Network,
-RefreshCw,
-RotateCcw,
-Search,
-Shield,
-Wrench,
-X,
+  GitBranch,
+  KeyRound,
+  Loader2,
+  Network,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Shield,
+  UserPlus,
+  Wrench,
+  X,
 } from "lucide-react";
 import React,{ useCallback,useEffect,useRef,useState } from "react";
 
@@ -38,6 +41,7 @@ const TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "auth", label: "Authorization" },
   { value: "openfga_rebac", label: "OpenFGA ReBAC" },
   { value: "cas_decision", label: "Authorization Service" },
+  { value: "cas_grant", label: "Policy Grant/Revoke" },
   { value: "tool_action", label: "Tool Action" },
   { value: "agent_delegation", label: "Agent Delegation" },
 ];
@@ -78,6 +82,13 @@ function TypeBadge({ type }: { type: AuditEventType }) {
         <Badge variant="outline" className="text-indigo-600 border-indigo-300 bg-indigo-50 dark:bg-indigo-950 dark:text-indigo-400 dark:border-indigo-800 gap-1">
           <KeyRound className="h-3 w-3" />
           Authorization Service
+        </Badge>
+      );
+    case "cas_grant":
+      return (
+        <Badge variant="outline" className="text-violet-600 border-violet-300 bg-violet-50 dark:bg-violet-950 dark:text-violet-400 dark:border-violet-800 gap-1">
+          <UserPlus className="h-3 w-3" />
+          Policy Grant/Revoke
         </Badge>
       );
     case "agent_delegation":
@@ -382,8 +393,8 @@ export function UnifiedAuditTab({ isAdmin }: UnifiedAuditTabProps) {
                           <td className="px-3 py-2 text-xs">
                             {evt.agent_name || "—"}
                           </td>
-                          <td className="px-3 py-2 text-xs max-w-[200px] truncate" title={evt.user_email || evt.subject_hash}>
-                            {evt.user_email || <span className="text-muted-foreground">{evt.subject_hash.slice(0, 16) + "…"}</span>}
+                          <td className="px-3 py-2 text-xs max-w-[200px] truncate" title={evt.caller_ref || evt.user_email || evt.subject_hash}>
+                            {evt.caller_ref || evt.user_email || <span className="text-muted-foreground">{evt.subject_hash.slice(0, 16) + "…"}</span>}
                           </td>
                           <td className="px-3 py-2">
                             <OutcomeBadge outcome={evt.outcome} />
@@ -411,6 +422,10 @@ export function UnifiedAuditTab({ isAdmin }: UnifiedAuditTabProps) {
                                 <DetailField label="Trace ID" value={evt.trace_id} mono />
                                 <DetailField label="Reason Code" value={evt.reason_code} />
                                 <DetailField label="Resource Ref" value={evt.resource_ref} />
+                                <DetailField label="Operation" value={evt.operation} />
+                                <DetailField label="Caller" value={evt.caller_ref} />
+                                <DetailField label="Grantee" value={evt.grantee_ref} />
+                                <DetailField label="Actor Hash" value={evt.actor_hash} mono />
                                 <DetailField label="Subject Hash" value={evt.subject_hash} mono />
                                 <DetailField label="Tenant" value={evt.tenant_id} />
                               </div>

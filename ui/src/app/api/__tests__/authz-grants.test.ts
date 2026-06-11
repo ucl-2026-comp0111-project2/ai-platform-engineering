@@ -7,6 +7,7 @@ const mockGetServerSession = jest.fn();
 const mockAuthorize = jest.fn();
 const mockGrant = jest.fn();
 const mockRevoke = jest.fn();
+const mockEmitGrantAudit = jest.fn();
 
 jest.mock("next-auth", () => ({ getServerSession: (...a: unknown[]) => mockGetServerSession(...a) }));
 jest.mock("@/lib/auth-config", () => ({ authOptions: {} }));
@@ -38,6 +39,9 @@ jest.mock("@/lib/authz", () => ({
   grant: (...a: unknown[]) => mockGrant(...a),
   revoke: (...a: unknown[]) => mockRevoke(...a),
 }));
+jest.mock("@/lib/authz/audit", () => ({
+  emitGrantAudit: (...a: unknown[]) => mockEmitGrantAudit(...a),
+}));
 
 import { POST, DELETE } from "../admin/authz/grants/route";
 
@@ -58,8 +62,13 @@ it("grants when the caller can manage the resource", async () => {
   expect(await res.json()).toEqual({ granted: true });
   expect(mockGrant).toHaveBeenCalledWith(
     { resource: { type: "agent", id: "pe" }, grantee: { type: "team", id: "eng" }, capability: "use" },
-    expect.anything(),
+    expect.objectContaining({
+      tenantId: "acme",
+      caller: { type: "user", id: "admin" },
+      correlationId: expect.any(String),
+    }),
   );
+  expect(mockEmitGrantAudit).not.toHaveBeenCalled();
 });
 
 it("revokes on DELETE", async () => {
@@ -74,6 +83,27 @@ it("returns 403 (meta-authz) when the caller cannot manage the resource", async 
   const res = await POST(body(validGrant));
   expect(res.status).toBe(403);
   expect(mockGrant).not.toHaveBeenCalled();
+  expect(mockEmitGrantAudit).toHaveBeenCalledWith(
+    "grant",
+    { resource: { type: "agent", id: "pe" }, grantee: { type: "team", id: "eng" }, capability: "use" },
+    expect.objectContaining({ caller: { type: "user", id: "admin" }, tenantId: "acme" }),
+    { outcome: "error", reasonCode: "NO_CAPABILITY" },
+  );
+});
+
+it("threads x-correlation-id into grant context", async () => {
+  const res = await POST(
+    new NextRequest(new URL("/api/admin/authz/grants", "http://localhost:3000"), {
+      method: "POST",
+      headers: { "x-correlation-id": "corr-admin-grant" },
+      body: JSON.stringify(validGrant),
+    }),
+  );
+  expect(res.status).toBe(200);
+  expect(mockGrant).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ correlationId: "corr-admin-grant" }),
+  );
 });
 
 it("returns 400 for an invalid grant body", async () => {

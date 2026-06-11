@@ -12,7 +12,7 @@ import { createHash, randomUUID } from "crypto";
 
 import { getCollection, isMongoDBConfigured } from "@/lib/mongodb";
 
-import type { Action, AuthorizeResult, DecisionContext, Resource, Subject } from "./contract";
+import type { Action, AuthorizeResult, DecisionContext, GrantIntent, Resource, Subject } from "./contract";
 
 const AUDIT_EVENTS = "audit_events";
 const SUBJECT_SALT = process.env.AUDIT_SUBJECT_SALT ?? "caipe-098-audit";
@@ -92,6 +92,111 @@ export function emitDecisionAudit(
       await coll.insertOne(event);
     } catch (err) {
       console.warn("[cas/audit] Failed to persist decision event:", err);
+    }
+  })();
+}
+
+export type GrantOperation = "grant" | "revoke";
+export type GrantAuditOutcome = "success" | "error";
+
+export interface GrantAuditOptions {
+  outcome?: GrantAuditOutcome;
+  /** Why the attempt failed (meta-authz deny, PDP error, etc.). */
+  reasonCode?: string;
+}
+
+function principalRef(type: string, id?: string): string {
+  if (type === "everyone") return "user:*";
+  return `${type}:${id ?? ""}`;
+}
+
+function granteeLabel(g: GrantIntent["grantee"]): string {
+  return principalRef(g.type, g.type === "everyone" ? undefined : g.id);
+}
+
+/**
+ * Durable audit record for a grant/revoke attempt (success or failure).
+ * Conforms to the unified audit tab — caller, grantee, resource, capability,
+ * operation, outcome, reason, and tenant/correlation context are explicit.
+ */
+export interface CasGrantEvent {
+  audit_event_id: string;
+  ts: Date;
+  type: "cas_grant";
+  tenant_id: string;
+  /** Hashed caller — who performed the policy change. */
+  subject_hash: string;
+  actor_hash: string;
+  caller_ref: string;
+  grantee_ref: string;
+  action: Action;
+  operation: GrantOperation;
+  outcome: GrantAuditOutcome;
+  reason_code?: string;
+  resource_ref: string;
+  resource_type: string;
+  resource_id: string;
+  correlation_id: string;
+  component: "cas";
+  pdp: "openfga";
+  source: "cas";
+  trace_id?: string;
+  span_id?: string;
+}
+
+export function buildGrantEvent(
+  operation: GrantOperation,
+  intent: GrantIntent,
+  ctx: DecisionContext = {},
+  options: GrantAuditOptions = {},
+): CasGrantEvent {
+  if (!ctx.caller) {
+    throw new Error("buildGrantEvent requires ctx.caller");
+  }
+  const outcome = options.outcome ?? "success";
+  const callerRef = principalRef(ctx.caller.type, ctx.caller.id);
+  return {
+    audit_event_id: randomUUID(),
+    ts: new Date(),
+    type: "cas_grant",
+    tenant_id: ctx.tenantId ?? process.env.TENANT_ID ?? "default",
+    subject_hash: hashSubject(ctx.caller.id),
+    actor_hash: hashSubject(ctx.caller.id),
+    caller_ref: callerRef,
+    grantee_ref: granteeLabel(intent.grantee),
+    action: intent.capability,
+    operation,
+    outcome,
+    resource_ref: `${intent.resource.type}:${intent.resource.id}`,
+    resource_type: intent.resource.type,
+    resource_id: intent.resource.id,
+    correlation_id: ctx.correlationId ?? randomUUID(),
+    component: "cas",
+    pdp: "openfga",
+    source: "cas",
+    ...(options.reasonCode ? { reason_code: options.reasonCode } : {}),
+    ...(ctx.traceId ? { trace_id: ctx.traceId } : {}),
+    ...(ctx.spanId ? { span_id: ctx.spanId } : {}),
+  };
+}
+
+/** One audit event per grant/revoke attempt → unified `audit_events`. */
+export function emitGrantAudit(
+  operation: GrantOperation,
+  intent: GrantIntent,
+  ctx: DecisionContext = {},
+  options: GrantAuditOptions = {},
+): void {
+  if (!isMongoDBConfigured || !ctx.caller) return;
+
+  const event = buildGrantEvent(operation, intent, ctx, options);
+
+  void (async () => {
+    try {
+      const coll = await getCollection<CasGrantEvent>(AUDIT_EVENTS);
+      await coll.insertOne(event);
+    } catch (err) {
+      console.warn("[cas/audit] Failed to persist grant event:", err);
     }
   })();
 }

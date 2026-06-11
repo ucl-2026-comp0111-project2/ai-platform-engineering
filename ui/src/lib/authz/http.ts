@@ -8,6 +8,7 @@
 import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 
+import { emitGrantAudit, type GrantOperation } from "./audit";
 import { authorize } from "./index";
 import type {
   Action,
@@ -85,13 +86,18 @@ export function resolveCaller(session: unknown): Caller | null {
   return { type: s.isServiceAccount === true ? "service_account" : "user", id: sub };
 }
 
-export function decisionContext(session: unknown): DecisionContext {
+export function decisionContext(session: unknown, caller?: Caller, request?: Request): DecisionContext {
   let tenantId: string | undefined;
   if (session && typeof session === "object") {
     const org = (session as { org?: unknown }).org;
     if (typeof org === "string" && org.trim()) tenantId = org.trim();
   }
-  return { tenantId, correlationId: randomUUID() };
+  const headerCorrelation = request?.headers.get("x-correlation-id")?.trim();
+  return {
+    tenantId,
+    correlationId: headerCorrelation || randomUUID(),
+    ...(caller ? { caller: { type: caller.type, id: caller.id } } : {}),
+  };
 }
 
 // ─── Input validation ─────────────────────────────────────────────────────────
@@ -213,10 +219,27 @@ export function parseGrantIntent(raw: unknown): GrantIntent {
   return { resource, grantee, capability };
 }
 
+/** Optional grant/revoke audit context when meta-authz fails before the PAP write. */
+export interface GrantAuditRequest {
+  operation: GrantOperation;
+  intent: GrantIntent;
+}
+
 /** Per-resource meta-authz: the caller must hold `manage` on the resource to grant/revoke. */
-export async function requireManage(caller: Caller, resource: Resource, ctx: DecisionContext): Promise<void> {
+export async function requireManage(
+  caller: Caller,
+  resource: Resource,
+  ctx: DecisionContext,
+  audit?: GrantAuditRequest,
+): Promise<void> {
   const check = await authorize({ subject: caller, resource, action: "manage" }, ctx);
   if (check.decision !== "ALLOW") {
+    if (audit) {
+      emitGrantAudit(audit.operation, audit.intent, ctx, {
+        outcome: "error",
+        reasonCode: check.reason,
+      });
+    }
     throw new HttpAuthzError(403, "FORBIDDEN", "You must have manage permission on the resource to grant or revoke access");
   }
 }

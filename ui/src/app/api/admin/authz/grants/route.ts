@@ -16,7 +16,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth-config";
 import { withErrorHandler, ApiError } from "@/lib/api-middleware";
 import { grant, revoke } from "@/lib/authz";
-import { HttpAuthzError, parseGrantIntent, requireManage } from "@/lib/authz/http";
+import { HttpAuthzError, decisionContext, parseGrantIntent, requireManage } from "@/lib/authz/http";
 
 async function handle(request: NextRequest, op: "grant" | "revoke"): Promise<NextResponse> {
   const session = (await getServerSession(authOptions)) as {
@@ -37,10 +37,10 @@ async function handle(request: NextRequest, op: "grant" | "revoke"): Promise<Nex
   }
 
   const caller = { type: "user" as const, id: session.sub };
-  const ctx = { tenantId: session.org };
+  const ctx = decisionContext(session, caller, request);
   try {
     const intent = parseGrantIntent(body);
-    await requireManage(caller, intent.resource, ctx); // meta-authz: caller must manage the resource
+    await requireManage(caller, intent.resource, ctx, { operation: op, intent });
     if (op === "grant") {
       await grant(intent, ctx);
     } else {

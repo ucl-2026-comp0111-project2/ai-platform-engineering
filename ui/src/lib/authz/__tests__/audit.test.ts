@@ -13,7 +13,7 @@ jest.mock("@/lib/mongodb", () => ({
   },
 }));
 
-import { buildDecisionEvent, emitDecisionAudit } from "../audit";
+import { buildDecisionEvent, buildGrantEvent, emitDecisionAudit, emitGrantAudit } from "../audit";
 
 const subject = { type: "user" as const, id: "alice" };
 const resource = { type: "agent" as const, id: "platform-engineer" };
@@ -82,6 +82,116 @@ describe("emitDecisionAudit", () => {
     expect(() => emitDecisionAudit(subject, resource, "use", { decision: "DENY", reason: "NO_CAPABILITY", retriable: false })).not.toThrow();
     await new Promise((r) => setImmediate(r));
     expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+const grantIntent = {
+  resource: { type: "agent" as const, id: "platform-engineer" },
+  grantee: { type: "team" as const, id: "eng" },
+  capability: "use" as const,
+};
+const caller = { type: "user" as const, id: "alice" };
+
+describe("buildGrantEvent — policy-change audit conformance", () => {
+  it("records caller, grantee, resource, capability, operation, outcome, and context", () => {
+    const e = buildGrantEvent("grant", grantIntent, {
+      caller,
+      tenantId: "acme",
+      correlationId: "corr-grant-1",
+      traceId: "t-2",
+    });
+    expect(e).toMatchObject({
+      type: "cas_grant",
+      tenant_id: "acme",
+      correlation_id: "corr-grant-1",
+      caller_ref: "user:alice",
+      grantee_ref: "team:eng",
+      action: "use",
+      operation: "grant",
+      outcome: "success",
+      resource_ref: "agent:platform-engineer",
+      resource_type: "agent",
+      resource_id: "platform-engineer",
+      component: "cas",
+      pdp: "openfga",
+      source: "cas",
+      trace_id: "t-2",
+    });
+    expect(e.subject_hash).toMatch(/^sha256:/);
+    expect(e.actor_hash).toBe(e.subject_hash);
+    expect(e.subject_hash).not.toContain("alice");
+  });
+
+  it("maps everyone grantee to user:*", () => {
+    const e = buildGrantEvent("revoke", {
+      ...grantIntent,
+      grantee: { type: "everyone" },
+    }, { caller, correlationId: "c-1" });
+    expect(e).toMatchObject({ operation: "revoke", grantee_ref: "user:*", outcome: "success" });
+  });
+
+  it("records failed attempts with error outcome and reason_code", () => {
+    const e = buildGrantEvent("grant", grantIntent, { caller, tenantId: "acme" }, {
+      outcome: "error",
+      reasonCode: "NO_CAPABILITY",
+    });
+    expect(e).toMatchObject({
+      outcome: "error",
+      reason_code: "NO_CAPABILITY",
+      operation: "grant",
+      caller_ref: "user:alice",
+    });
+  });
+
+  it("requires ctx.caller", () => {
+    expect(() => buildGrantEvent("grant", grantIntent, {})).toThrow(/ctx\.caller/);
+  });
+});
+
+describe("emitGrantAudit", () => {
+  it("inserts cas_grant when Mongo is configured and caller is present", async () => {
+    emitGrantAudit("grant", grantIntent, { caller, tenantId: "acme", correlationId: "c-1" });
+    await new Promise((r) => setImmediate(r));
+    expect(mockInsertOne).toHaveBeenCalledTimes(1);
+    expect(mockInsertOne.mock.calls[0][0]).toMatchObject({
+      type: "cas_grant",
+      caller_ref: "user:alice",
+      operation: "grant",
+      outcome: "success",
+    });
+  });
+
+  it("is a no-op without caller (never writes anonymous policy changes)", () => {
+    emitGrantAudit("grant", grantIntent, { tenantId: "acme" });
+    expect(mockInsertOne).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when Mongo is not configured", () => {
+    mongoConfigured = false;
+    emitGrantAudit("grant", grantIntent, { caller });
+    expect(mockGetCollection).not.toHaveBeenCalled();
+  });
+
+  it("persists failed attempts when outcome is error", async () => {
+    mongoConfigured = true;
+    emitGrantAudit("revoke", grantIntent, { caller }, { outcome: "error", reasonCode: "PDP_WRITE_FAILED" });
+    await new Promise((r) => setImmediate(r));
+    expect(mockInsertOne.mock.calls[0][0]).toMatchObject({
+      outcome: "error",
+      reason_code: "PDP_WRITE_FAILED",
+      operation: "revoke",
+    });
+  });
+
+  it("swallows insert failures (never throws into the grant path)", async () => {
+    mockInsertOne.mockRejectedValue(new Error("mongo down"));
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() =>
+      emitGrantAudit("grant", grantIntent, { caller }, { outcome: "error", reasonCode: "NO_CAPABILITY" }),
+    ).not.toThrow();
+    await new Promise((r) => setImmediate(r));
+    expect(warn).toHaveBeenCalledWith("[cas/audit] Failed to persist grant event:", expect.any(Error));
     warn.mockRestore();
   });
 });

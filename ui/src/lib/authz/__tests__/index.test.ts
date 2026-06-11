@@ -22,6 +22,16 @@ jest.mock("../engines/openfga", () => {
 // Audit is a no-op in tests (Mongo unconfigured).
 jest.mock("@/lib/mongodb", () => ({ getCollection: jest.fn(), isMongoDBConfigured: false }));
 
+const mockEmitGrantAudit = jest.fn();
+jest.mock("../audit", () => {
+  const actual = jest.requireActual("../audit");
+  return {
+    ...actual,
+    emitDecisionAudit: jest.fn(),
+    emitGrantAudit: (...args: unknown[]) => mockEmitGrantAudit(...args),
+  };
+});
+
 import * as openfgaEngine from "../engines/openfga";
 const { check: mockCheck, batchCheck: mockBatch, grant: mockGrant, revoke: mockRevoke } = (
   openfgaEngine as unknown as { __mocks: { check: jest.Mock; batchCheck: jest.Mock; grant: jest.Mock; revoke: jest.Mock } }
@@ -91,15 +101,41 @@ describe("authorizeMany", () => {
 });
 
 describe("grant / revoke (PAP)", () => {
-  it("grant delegates to the admin engine", async () => {
-    const intent = { resource: { type: "agent" as const, id: "pe" }, grantee: { type: "team" as const, id: "eng" }, capability: "use" as const };
-    await grant(intent);
-    expect(mockGrant).toHaveBeenCalledWith(intent, undefined);
+  const ctx = { caller: { type: "user" as const, id: "alice" }, tenantId: "acme", correlationId: "c-1" };
+
+  beforeEach(() => {
+    mockEmitGrantAudit.mockClear();
   });
-  it("revoke delegates to the admin engine", async () => {
+
+  it("grant delegates to the admin engine and emits audit", async () => {
+    const intent = { resource: { type: "agent" as const, id: "pe" }, grantee: { type: "team" as const, id: "eng" }, capability: "use" as const };
+    await grant(intent, ctx);
+    expect(mockGrant).toHaveBeenCalledWith(intent);
+    expect(mockEmitGrantAudit).toHaveBeenCalledWith("grant", intent, ctx, { outcome: "success" });
+  });
+  it("revoke delegates to the admin engine and emits audit", async () => {
     const intent = { resource: { type: "agent" as const, id: "pe" }, grantee: { type: "everyone" as const }, capability: "use" as const };
-    await revoke(intent);
-    expect(mockRevoke).toHaveBeenCalledWith(intent, undefined);
+    await revoke(intent, ctx);
+    expect(mockRevoke).toHaveBeenCalledWith(intent);
+    expect(mockEmitGrantAudit).toHaveBeenCalledWith("revoke", intent, ctx, { outcome: "success" });
+  });
+  it("emits error audit when the PDP write fails", async () => {
+    const intent = { resource: { type: "agent" as const, id: "pe" }, grantee: { type: "team" as const, id: "eng" }, capability: "use" as const };
+    mockGrant.mockRejectedValueOnce(new Error("OpenFGA write failed"));
+    await expect(grant(intent, ctx)).rejects.toThrow("OpenFGA write failed");
+    expect(mockEmitGrantAudit).toHaveBeenCalledWith("grant", intent, ctx, {
+      outcome: "error",
+      reasonCode: "PDP_WRITE_FAILED",
+    });
+  });
+  it("emits error audit when revoke PDP write fails", async () => {
+    const intent = { resource: { type: "agent" as const, id: "pe" }, grantee: { type: "team" as const, id: "eng" }, capability: "use" as const };
+    mockRevoke.mockRejectedValueOnce(new Error("OpenFGA write failed"));
+    await expect(revoke(intent, ctx)).rejects.toThrow("OpenFGA write failed");
+    expect(mockEmitGrantAudit).toHaveBeenCalledWith("revoke", intent, ctx, {
+      outcome: "error",
+      reasonCode: "PDP_WRITE_FAILED",
+    });
   });
 });
 

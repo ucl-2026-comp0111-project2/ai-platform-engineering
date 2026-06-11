@@ -7,6 +7,7 @@ const mockGetAuth = jest.fn();
 const mockAuthorize = jest.fn();
 const mockGrant = jest.fn();
 const mockRevoke = jest.fn();
+const mockEmitGrantAudit = jest.fn();
 
 jest.mock("@/lib/api-middleware", () => ({
   getAuthFromBearerOrSession: (...a: unknown[]) => mockGetAuth(...a),
@@ -15,6 +16,9 @@ jest.mock("@/lib/authz", () => ({
   authorize: (...a: unknown[]) => mockAuthorize(...a),
   grant: (...a: unknown[]) => mockGrant(...a),
   revoke: (...a: unknown[]) => mockRevoke(...a),
+}));
+jest.mock("@/lib/authz/audit", () => ({
+  emitGrantAudit: (...a: unknown[]) => mockEmitGrantAudit(...a),
 }));
 jest.mock("@/lib/mongodb", () => ({ getCollection: jest.fn(), isMongoDBConfigured: false }));
 
@@ -31,7 +35,7 @@ const validGrant = { resource: { type: "agent", id: "pe" }, grantee: { type: "te
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockGetAuth.mockResolvedValue({ session: { sub: "alice" } });
+  mockGetAuth.mockResolvedValue({ session: { sub: "alice", org: "acme" } });
   mockAuthorize.mockResolvedValue({ decision: "ALLOW", reason: "OK" });
 });
 
@@ -41,8 +45,13 @@ it("grants when the caller can manage the resource", async () => {
   expect(await res.json()).toEqual({ granted: true });
   expect(mockGrant).toHaveBeenCalledWith(
     { resource: { type: "agent", id: "pe" }, grantee: { type: "team", id: "eng" }, capability: "use" },
-    expect.anything(),
+    expect.objectContaining({
+      tenantId: "acme",
+      caller: { type: "user", id: "alice" },
+      correlationId: expect.any(String),
+    }),
   );
+  expect(mockEmitGrantAudit).not.toHaveBeenCalled();
 });
 
 it("revokes on DELETE", async () => {
@@ -57,6 +66,39 @@ it("returns 403 when caller cannot manage the resource", async () => {
   const res = await POST(req(validGrant));
   expect(res.status).toBe(403);
   expect(mockGrant).not.toHaveBeenCalled();
+  expect(mockEmitGrantAudit).toHaveBeenCalledWith(
+    "grant",
+    { resource: { type: "agent", id: "pe" }, grantee: { type: "team", id: "eng" }, capability: "use" },
+    expect.objectContaining({ caller: { type: "user", id: "alice" }, tenantId: "acme" }),
+    { outcome: "error", reasonCode: "NO_CAPABILITY" },
+  );
+});
+
+it("audits failed revoke attempts on meta-authz deny", async () => {
+  mockAuthorize.mockResolvedValue({ decision: "DENY", reason: "AUTHZ_UNAVAILABLE" });
+  const res = await DELETE(req(validGrant, "DELETE"));
+  expect(res.status).toBe(403);
+  expect(mockRevoke).not.toHaveBeenCalled();
+  expect(mockEmitGrantAudit).toHaveBeenCalledWith(
+    "revoke",
+    expect.any(Object),
+    expect.objectContaining({ caller: { type: "user", id: "alice" } }),
+    { outcome: "error", reasonCode: "AUTHZ_UNAVAILABLE" },
+  );
+});
+
+it("threads x-correlation-id into grant context", async () => {
+  const r = new NextRequest(new URL("/api/authz/v1/grants", "http://localhost:3000"), {
+    method: "POST",
+    headers: { "x-correlation-id": "corr-v1-grant" },
+    body: JSON.stringify(validGrant),
+  });
+  const res = await POST(r);
+  expect(res.status).toBe(200);
+  expect(mockGrant).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ correlationId: "corr-v1-grant" }),
+  );
 });
 
 it("returns 401 with no auth", async () => {

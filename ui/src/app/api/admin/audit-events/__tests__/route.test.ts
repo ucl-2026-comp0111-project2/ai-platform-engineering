@@ -54,6 +54,14 @@ interface TestAuditDoc {
   source: string;
   agent_name?: string;
   tool_name?: string;
+  actor_hash?: string;
+  caller_ref?: string;
+  grantee_ref?: string;
+  operation?: string;
+  reason_code?: string;
+  resource_ref?: string;
+  component?: string;
+  pdp?: string;
 }
 
 const docs: TestAuditDoc[] = [
@@ -120,6 +128,41 @@ const docs: TestAuditDoc[] = [
     correlation_id: "openfga-correlation",
     source: "webui_backend",
   },
+  {
+    ts: new Date("2026-05-17T16:59:29.000Z"),
+    type: "cas_grant",
+    tenant_id: "acme",
+    subject_hash: "hash-caller",
+    actor_hash: "hash-caller",
+    action: "use",
+    outcome: "success",
+    correlation_id: "grant-success-correlation",
+    source: "cas",
+    caller_ref: "user:alice",
+    grantee_ref: "team:eng",
+    operation: "grant",
+    resource_ref: "agent:platform-engineer",
+    component: "cas",
+    pdp: "openfga",
+  },
+  {
+    ts: new Date("2026-05-17T16:59:30.000Z"),
+    type: "cas_grant",
+    tenant_id: "acme",
+    subject_hash: "hash-caller",
+    actor_hash: "hash-caller",
+    action: "use",
+    outcome: "error",
+    correlation_id: "grant-deny-correlation",
+    source: "cas",
+    caller_ref: "user:alice",
+    grantee_ref: "team:eng",
+    operation: "grant",
+    reason_code: "NO_CAPABILITY",
+    resource_ref: "agent:platform-engineer",
+    component: "cas",
+    pdp: "openfga",
+  },
 ];
 
 function applyFilter(filter: Record<string, unknown>): TestAuditDoc[] {
@@ -179,6 +222,8 @@ describe("GET /api/admin/audit-events", () => {
       "argocd_list_applications",
       "delegate_to_argocd",
       "agent#use",
+      "use",
+      "use",
     ]);
     expect(body.records.map((record: TestAuditDoc) => record.type)).toEqual([
       "auth",
@@ -187,6 +232,8 @@ describe("GET /api/admin/audit-events", () => {
       "tool_action",
       "agent_delegation",
       "openfga_rebac",
+      "cas_grant",
+      "cas_grant",
     ]);
   });
 
@@ -202,5 +249,31 @@ describe("GET /api/admin/audit-events", () => {
       "admin_ui#audit.view",
       "system_config#read",
     ]);
+  });
+
+  it("filters cas_grant policy-change events and maps grant audit fields", async () => {
+    const { GET } = await import("../route");
+
+    const response = await GET(request("/api/admin/audit-events?type=cas_grant"));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.records).toHaveLength(2);
+    expect(body.records[0]).toMatchObject({
+      type: "cas_grant",
+      outcome: "success",
+      operation: "grant",
+      caller_ref: "user:alice",
+      grantee_ref: "team:eng",
+      resource_ref: "agent:platform-engineer",
+      source: "cas",
+      tenant_id: "acme",
+    });
+    expect(body.records[1]).toMatchObject({
+      type: "cas_grant",
+      outcome: "error",
+      reason_code: "NO_CAPABILITY",
+      operation: "grant",
+    });
   });
 });

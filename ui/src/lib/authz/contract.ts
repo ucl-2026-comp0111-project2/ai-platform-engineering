@@ -73,6 +73,8 @@ export interface DecisionContext {
   correlationId?: string;
   traceId?: string;
   spanId?: string;
+  /** Principal performing a grant/revoke (PAP). Recorded in grant audit events. */
+  caller?: Subject;
 }
 
 // ─── Grant / Revoke (PAP) ─────────────────────────────────────────────────────

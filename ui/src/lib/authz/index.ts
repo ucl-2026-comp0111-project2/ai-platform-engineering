@@ -14,7 +14,7 @@ import type {
   Subject,
 } from "./contract";
 import { compose } from "./compose";
-import { emitDecisionAudit } from "./audit";
+import { emitDecisionAudit, emitGrantAudit } from "./audit";
 import { createOpenFgaEngine, createOpenFgaAdmin } from "./engines/openfga";
 import { workflowDelegationPreCheck } from "./domains/workflow";
 
@@ -89,12 +89,24 @@ export async function filterAccessible(
 
 // ─── Grant / Revoke (PAP) ─────────────────────────────────────────────────────
 
-export async function grant(intent: GrantIntent, ctx?: DecisionContext): Promise<void> {
-  await admin.grant(intent, ctx);
+export async function grant(intent: GrantIntent, ctx: DecisionContext = {}): Promise<void> {
+  try {
+    await admin.grant(intent);
+    emitGrantAudit("grant", intent, ctx, { outcome: "success" });
+  } catch (err) {
+    emitGrantAudit("grant", intent, ctx, { outcome: "error", reasonCode: "PDP_WRITE_FAILED" });
+    throw err;
+  }
 }
 
-export async function revoke(intent: GrantIntent, ctx?: DecisionContext): Promise<void> {
-  await admin.revoke(intent, ctx);
+export async function revoke(intent: GrantIntent, ctx: DecisionContext = {}): Promise<void> {
+  try {
+    await admin.revoke(intent);
+    emitGrantAudit("revoke", intent, ctx, { outcome: "success" });
+  } catch (err) {
+    emitGrantAudit("revoke", intent, ctx, { outcome: "error", reasonCode: "PDP_WRITE_FAILED" });
+    throw err;
+  }
 }
 
 // ─── Error type ───────────────────────────────────────────────────────────────

@@ -45,10 +45,10 @@ async function handle(request: NextRequest, op: "grant" | "revoke"): Promise<Nex
     return metaErrorResponse(new HttpAuthzError(400, "INVALID_REQUEST", "Request body must be valid JSON"));
   }
 
-  const ctx = decisionContext(session);
+  const ctx = decisionContext(session, caller, request);
   try {
     const intent = parseGrantIntent(body);
-    await requireManage(caller, intent.resource, ctx);
+    await requireManage(caller, intent.resource, ctx, { operation: op, intent });
     if (op === "grant") {
       await grant(intent, ctx);
     } else {

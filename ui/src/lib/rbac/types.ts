@@ -127,7 +127,8 @@ export type AuditEventType =
   | "tool_action"
   | "agent_delegation"
   | "openfga_rebac"
-  | "cas_decision";
+  | "cas_decision"
+  | "cas_grant";
 
 /** Unified audit event outcome — superset of AuditOutcome for tool/delegation */
 export type UnifiedAuditOutcome = "allow" | "deny" | "success" | "error";
@@ -139,7 +140,8 @@ export type AuditEventSource =
   | "supervisor"
   | "slack"
   | "dynamic_agents"
-  | "openfga_authz_bridge";
+  | "openfga_authz_bridge"
+  | "cas";
 
 /** Unified audit event stored in the audit_events MongoDB collection (FR-037) */
 export interface UnifiedAuditEvent {
@@ -164,6 +166,14 @@ export interface UnifiedAuditEvent {
   trace_id?: string;
   span_id?: string;
   trace_url?: string;
+  /** CAS grant/revoke: hashed caller principal. */
+  actor_hash?: string;
+  /** CAS grant/revoke: readable caller ref (e.g. user:sub). */
+  caller_ref?: string;
+  /** CAS grant/revoke: readable grantee ref (e.g. team:eng). */
+  grantee_ref?: string;
+  /** CAS grant/revoke: grant | revoke. */
+  operation?: "grant" | "revoke";
 }
 
 /** Admin dashboard tab keys for RBAC-based visibility */
