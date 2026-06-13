@@ -1374,6 +1374,11 @@ async function ensureBotOboPermissions(botClientId: string, policyName: string):
       oboAudienceTokenExchangePermissionId,
       policy.id
     ),
+    setScopePermissionDecisionStrategy(
+      realmManagementClient.id,
+      botTokenExchangePermissionId,
+      "AFFIRMATIVE"
+    ),
   ]);
 }
 

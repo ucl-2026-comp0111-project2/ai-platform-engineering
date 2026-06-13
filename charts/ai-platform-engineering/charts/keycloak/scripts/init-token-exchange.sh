@@ -3,7 +3,7 @@
 # deploy/keycloak/init-token-exchange.sh
 #
 # Configures Keycloak token exchange (RFC 8693) impersonation for the
-# CAIPE Slack bot.  Runs after realm import to set up fine-grained
+# CAIPE Slack and Webex bots.  Runs after realm import to set up fine-grained
 # admin permissions that cannot be declared in realm-config.json.
 #
 # Idempotent — safe to re-run on every container start.
@@ -15,9 +15,10 @@
 #   KEYCLOAK_ADMIN_PASSWORD / KC_BOOTSTRAP_ADMIN_PASSWORD (default: admin)
 #
 # Optional:
-#   KC_REALM           – realm name (default: caipe)
-#   KC_BOT_CLIENT_ID   – bot client-id (default: caipe-slack-bot)
-#   KC_SSL_REQUIRED    – realm sslRequired (default: none for dev)
+#   KC_REALM               – realm name (default: caipe)
+#   KC_BOT_CLIENT_ID       – Slack bot client-id (default: caipe-slack-bot)
+#   KC_WEBEX_BOT_CLIENT_ID – Webex bot client-id (default: caipe-webex-bot)
+#   KC_SSL_REQUIRED        – realm sslRequired (default: none for dev)
 # -------------------------------------------------------------------
 set -eu
 
@@ -350,7 +351,7 @@ if [ -n "${WEBEX_BOT_CLIENT_ID}" ]; then
 fi
 
 # ------------------------------------------------------------------
-# 6. Enable management permissions on the bot client
+# 6a. Enable management permissions on the Slack bot client
 # ------------------------------------------------------------------
 echo "${TAG} Enabling management permissions on '${BOT_CLIENT_ID}' ..."
 
@@ -379,7 +380,7 @@ TOKEN_EXCHANGE_PERM_ID=$(echo "${MGMT_PERMS}" | grep -o '"token-exchange" *: *"[
 echo "${TAG}   token-exchange permission ID: ${TOKEN_EXCHANGE_PERM_ID:-NOT_FOUND}"
 
 # ------------------------------------------------------------------
-# 7. Create client policy for the bot (idempotent)
+# 7a. Create client policy for the Slack bot
 # ------------------------------------------------------------------
 if [ -z "${RM_CLIENT_ID}" ]; then
   echo "${TAG} WARNING: skipping policy setup — realm-management not found."
@@ -408,29 +409,85 @@ else
   fi
 
   # ------------------------------------------------------------------
-  # 8. Associate policy with token-exchange permission
+  # 8a. Associate policy with token-exchange permission for Slack bot
   # ------------------------------------------------------------------
   if [ -n "${TOKEN_EXCHANGE_PERM_ID}" ] && [ -n "${POLICY_ID}" ]; then
-    echo "${TAG} Associating policy with token-exchange permission ..."
+    echo "${TAG} Associating policy with token-exchange permission on '${BOT_CLIENT_ID}' ..."
+    attach_policy_to_scope_permission "${RM_CLIENT_ID}" "${TOKEN_EXCHANGE_PERM_ID}" "${POLICY_ID}" "${BOT_CLIENT_ID} token-exchange permission" || \
+      echo "${TAG}   WARNING: could not update token-exchange permission on ${BOT_CLIENT_ID}."
+  fi
+fi
 
-    # Get permission details (resources + scopes)
-    PERM_RESOURCES=$(curl -sf -H "${AUTH}" \
-      "${KC_URL}/admin/realms/${REALM}/clients/${RM_CLIENT_ID}/authz/resource-server/permission/scope/${TOKEN_EXCHANGE_PERM_ID}/resources" 2>/dev/null || echo "[]")
-    RESOURCE_ID=$(json_field "${PERM_RESOURCES}" "_id")
+# Refresh token (previous operations may have taken time)
+ACCESS_TOKEN=$(get_admin_token) || exit 1
+AUTH="Authorization: Bearer ${ACCESS_TOKEN}"
 
-    PERM_SCOPES=$(curl -sf -H "${AUTH}" \
-      "${KC_URL}/admin/realms/${REALM}/clients/${RM_CLIENT_ID}/authz/resource-server/permission/scope/${TOKEN_EXCHANGE_PERM_ID}/scopes" 2>/dev/null || echo "[]")
-    SCOPE_ID=$(json_field "${PERM_SCOPES}" "id")
+if [ -n "${WEBEX_BOT_CLIENT_ID}" ] && [ -n "${WEBEX_INTERNAL_ID:-}" ]; then
+  # ------------------------------------------------------------------
+  # 6b. Enable management permissions on the Webex bot client
+  # ------------------------------------------------------------------
+  echo "${TAG} Enabling management permissions on '${WEBEX_BOT_CLIENT_ID}' ..."
+  WEBEX_MGMT_PERMS=$(curl -sf -H "${AUTH}" \
+    "${KC_URL}/admin/realms/${REALM}/clients/${WEBEX_INTERNAL_ID}/management/permissions" 2>/dev/null || echo '{"enabled":false}')
 
-    PERM_NAME="token-exchange.permission.client.${BOT_INTERNAL_ID}"
-
-    attach_policy_to_scope_permission "${RM_CLIENT_ID}" "${TOKEN_EXCHANGE_PERM_ID}" "${POLICY_ID}" "token-exchange permission" || \
-      echo "${TAG}   WARNING: could not update token-exchange permission ${PERM_NAME}."
+  if [ "$(json_bool "${WEBEX_MGMT_PERMS}" "enabled")" = "true" ]; then
+    echo "${TAG}   Management permissions already enabled."
+    WEBEX_MGMT_PERMS=$(curl -sf -H "${AUTH}" \
+      "${KC_URL}/admin/realms/${REALM}/clients/${WEBEX_INTERNAL_ID}/management/permissions" 2>/dev/null || echo '{}')
+  else
+    WEBEX_MGMT_PERMS=$(curl -sf -X PUT -H "${AUTH}" -H "Content-Type: application/json" \
+      "${KC_URL}/admin/realms/${REALM}/clients/${WEBEX_INTERNAL_ID}/management/permissions" \
+      -d '{"enabled":true}' 2>/dev/null || echo '{}')
+    echo "${TAG}   Management permissions enabled."
   fi
 
+  # Extract token-exchange permission ID
+  WEBEX_TE_PERM_ID=$(echo "${WEBEX_MGMT_PERMS}" | grep -o '"token-exchange" *: *"[^"]*"' | sed 's/.*"\([^"]*\)"/\1/' | head -1)
+  echo "${TAG}   token-exchange permission ID: ${WEBEX_TE_PERM_ID:-NOT_FOUND}"
+
   # ------------------------------------------------------------------
-  # 9. Enable user management permissions + associate impersonate
+  # 7b. Create client policy for the Webex bot
   # ------------------------------------------------------------------
+  if [ -n "${RM_CLIENT_ID}" ]; then
+    echo "${TAG} Ensuring client policy for '${WEBEX_BOT_CLIENT_ID}' ..."
+    WEBEX_POLICY_NAME="caipe-webex-bot-token-exchange-policy"
+
+    EXISTING_POLICIES=$(curl -sf -H "${AUTH}" \
+      "${KC_URL}/admin/realms/${REALM}/clients/${RM_CLIENT_ID}/authz/resource-server/policy?name=${WEBEX_POLICY_NAME}&max=1" 2>/dev/null || echo "[]")
+
+    if echo "${EXISTING_POLICIES}" | grep -q "\"${WEBEX_POLICY_NAME}\""; then
+      echo "${TAG}   Policy '${WEBEX_POLICY_NAME}' already exists."
+      WEBEX_POLICY_ID=$(json_field "${EXISTING_POLICIES}" "id")
+    else
+      echo "${TAG}   Creating policy '${WEBEX_POLICY_NAME}' ..."
+      POLICY_RESP=$(curl -sf -X POST -H "${AUTH}" -H "Content-Type: application/json" \
+        "${KC_URL}/admin/realms/${REALM}/clients/${RM_CLIENT_ID}/authz/resource-server/policy/client" \
+        -d "{\"name\":\"${WEBEX_POLICY_NAME}\",\"description\":\"Allow ${WEBEX_BOT_CLIENT_ID} to perform token exchange\",\"logic\":\"POSITIVE\",\"clients\":[\"${WEBEX_INTERNAL_ID}\"]}" 2>/dev/null || echo '{}')
+      WEBEX_POLICY_ID=$(json_field "${POLICY_RESP}" "id")
+      if [ -n "${WEBEX_POLICY_ID}" ]; then
+        echo "${TAG}   Policy created: ${WEBEX_POLICY_ID}"
+      else
+        echo "${TAG}   WARNING: could not create policy."
+      fi
+    fi
+
+    # ------------------------------------------------------------------
+    # 8b. Associate policy with token-exchange permission
+    # ------------------------------------------------------------------
+    if [ -n "${WEBEX_TE_PERM_ID}" ] && [ -n "${WEBEX_POLICY_ID}" ]; then
+      echo "${TAG} Associating policy with token-exchange permission on '${WEBEX_BOT_CLIENT_ID}' ..."
+      attach_policy_to_scope_permission "${RM_CLIENT_ID}" "${WEBEX_TE_PERM_ID}" "${WEBEX_POLICY_ID}" "${WEBEX_BOT_CLIENT_ID} token-exchange permission" || \
+        echo "${TAG}   WARNING: could not update token-exchange permission on ${WEBEX_BOT_CLIENT_ID}."
+    fi
+  fi
+fi
+
+# ------------------------------------------------------------------
+# 9. Enable user management permissions + associate impersonate
+# ------------------------------------------------------------------
+if [ -z "${RM_CLIENT_ID}" ]; then
+  echo "${TAG} WARNING: skipping user management permissions — realm-management not found."
+else
   echo "${TAG} Enabling user management permissions ..."
 
   USER_MGMT=$(curl -sf -H "${AUTH}" \
@@ -451,19 +508,20 @@ else
   # Extract impersonate permission ID
   IMPERSONATE_PERM_ID=$(echo "${USER_MGMT}" | grep -o '"impersonate" *: *"[^"]*"' | sed 's/.*"\([^"]*\)"/\1/' | head -1)
 
-  if [ -n "${IMPERSONATE_PERM_ID}" ] && [ -n "${POLICY_ID}" ]; then
-    echo "${TAG} Associating policy with impersonate permission ..."
+  _attach_policy_to_impersonate() {
+    _pname="$1"
+    _existing_policy=$(curl -sf -H "${AUTH}" \
+      "${KC_URL}/admin/realms/${REALM}/clients/${RM_CLIENT_ID}/authz/resource-server/policy?name=${_pname}&max=1" 2>/dev/null || echo "[]")
+    _pid=$(json_field "${_existing_policy}" "id")
+    if [ -n "${_pid}" ] && [ -n "${IMPERSONATE_PERM_ID}" ]; then
+      attach_policy_to_scope_permission "${RM_CLIENT_ID}" "${IMPERSONATE_PERM_ID}" "${_pid}" "impersonate permission (${_pname})" || \
+        echo "${TAG}   WARNING: could not attach policy ${_pname} to impersonate permission."
+    fi
+  }
 
-    IMP_RESOURCES=$(curl -sf -H "${AUTH}" \
-      "${KC_URL}/admin/realms/${REALM}/clients/${RM_CLIENT_ID}/authz/resource-server/permission/scope/${IMPERSONATE_PERM_ID}/resources" 2>/dev/null || echo "[]")
-    IMP_RESOURCE_ID=$(json_field "${IMP_RESOURCES}" "_id")
-
-    IMP_SCOPES=$(curl -sf -H "${AUTH}" \
-      "${KC_URL}/admin/realms/${REALM}/clients/${RM_CLIENT_ID}/authz/resource-server/permission/scope/${IMPERSONATE_PERM_ID}/scopes" 2>/dev/null || echo "[]")
-    IMP_SCOPE_ID=$(json_field "${IMP_SCOPES}" "id")
-
-    attach_policy_to_scope_permission "${RM_CLIENT_ID}" "${IMPERSONATE_PERM_ID}" "${POLICY_ID}" "impersonate permission" || \
-      echo "${TAG}   WARNING: could not update impersonate permission."
+  _attach_policy_to_impersonate "caipe-slack-bot-token-exchange-policy"
+  if [ -n "${WEBEX_BOT_CLIENT_ID}" ]; then
+    _attach_policy_to_impersonate "caipe-webex-bot-token-exchange-policy"
   fi
 fi
 
