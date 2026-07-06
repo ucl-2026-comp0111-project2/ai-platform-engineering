@@ -399,9 +399,14 @@ class AIPlatformEngineerA2AExecutor(AgentExecutor):
             )
         )
 
-    async def _send_completion(self, event_queue: EventQueue, task: A2ATask, trace_id: str = None):
-        """Send task completion status with optional trace_id for client feedback."""
+    async def _send_completion(self, event_queue: EventQueue, task: A2ATask, trace_id: str = None, usage_metadata: dict = None):
+        """Send task completion status with optional trace_id and usage_metadata for client feedback."""
         logger.info(f"📤 Sending completion status for task {task.id} (trace_id={trace_id})")
+        meta = {}
+        if trace_id:
+            meta['trace_id'] = trace_id
+        if usage_metadata:
+            meta['usage_metadata'] = usage_metadata
         await self._safe_enqueue_event(
             event_queue,
             TaskStatusUpdateEvent(
@@ -409,7 +414,7 @@ class AIPlatformEngineerA2AExecutor(AgentExecutor):
                 final=True,
                 context_id=task.context_id,
                 task_id=task.id,
-                metadata={'trace_id': trace_id} if trace_id else None,
+                metadata=meta if meta else None,
             )
         )
         logger.info(f"📤 Completion status enqueued for task {task.id}")
@@ -631,8 +636,12 @@ class AIPlatformEngineerA2AExecutor(AgentExecutor):
             artifact.metadata = artifact.metadata or {}
             artifact.metadata['trace_id'] = state.trace_id
 
+        if event.get('usage_metadata'):
+            artifact.metadata = artifact.metadata or {}
+            artifact.metadata['usage_metadata'] = event['usage_metadata']
+
         await self._send_artifact(event_queue, task, artifact, append=False, last_chunk=True)
-        await self._send_completion(event_queue, task, trace_id=state.trace_id)
+        await self._send_completion(event_queue, task, trace_id=state.trace_id, usage_metadata=event.get('usage_metadata'))
         logger.info(f"Task {task.id} completed.")
 
     async def _handle_user_input_required(self, content: str, task: A2ATask,
@@ -842,6 +851,10 @@ class AIPlatformEngineerA2AExecutor(AgentExecutor):
         if state.current_plan_step_id and state.execution_plan_emitted:
             artifact.metadata = artifact.metadata or {}
             artifact.metadata['plan_step_id'] = state.current_plan_step_id
+
+        if event.get('usage_metadata'):
+            artifact.metadata = artifact.metadata or {}
+            artifact.metadata['usage_metadata'] = event['usage_metadata']
 
         # Tag streaming chunks as final answer when agent.py sets the signal.
         # Using event.get('is_final_answer') (set by agent.py's [FINAL ANSWER]
@@ -1468,20 +1481,8 @@ class AIPlatformEngineerA2AExecutor(AgentExecutor):
                                 content, state, task, event_queue
                             )
 
-                    artifact = new_text_artifact(
-                        name='final_result',
-                        description='Complete result from Platform Engineer',
-                        text=content,
-                    )
-                    reused_id = False
-                    logger.info(
-                        f"📤 final_result artifact: id={artifact.artifact_id}, "
-                        f"reused_streaming_id={reused_id}, parts={len(artifact.parts)}"
-                    )
-                    await self._send_artifact(event_queue, task, artifact, append=False, last_chunk=True)
-                    await self._send_completion(event_queue, task, trace_id=state.trace_id)
-                    logger.info(f"Task {task.id} completed (ResponseFormat tool, {len(content)} chars).")
-                    state.stream_finished = True
+                    state.final_model_content = content
+                    logger.info(f"ResponseFormat final answer saved to state.final_model_content ({len(content)} chars).")
                     continue
 
                 # 3. Task complete

@@ -35,6 +35,18 @@ from ai_platform_engineering.utils.a2a_common.langmem_utils import (
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.types import Command
 
+# Monkey-patch LLMFactory to always inject stream_options={"include_usage": True} for openai provider
+_original_get_llm = LLMFactory.get_llm
+
+def _patched_get_llm(self, *args, **kwargs):
+    if self.provider == "openai":
+        if "stream_options" not in kwargs:
+            kwargs["stream_options"] = {"include_usage": True}
+            logging.info("🔧 LLMFactory: Injected stream_options={'include_usage': True} into OpenAI LLM kwargs")
+    return _original_get_llm(self, *args, **kwargs)
+
+LLMFactory.get_llm = _patched_get_llm
+
 # Import LangGraph error types for proper handling
 try:
     from langgraph.errors import GraphInterrupt, GraphRecursionError
@@ -586,6 +598,12 @@ class AIPlatformEngineerA2ABinding:
           else:
               logging.debug("No trace_id available from parameter or context")
 
+      if 'configurable' not in config:
+          config['configurable'] = {}
+      if 'thread_id' not in config['configurable'] and context_id:
+          config['configurable']['thread_id'] = context_id
+          logging.info(f"Added thread_id to config.configurable: {context_id}")
+
       # Inject OBO token into configurable so auth-aware proxy tools can read it (FR-038e)
       obo_token = getattr(self, '_obo_token', None)
       if obo_token:
@@ -1060,6 +1078,8 @@ class AIPlatformEngineerA2ABinding:
               message = event[0] if event else None
               if not message:
                   continue
+              usage_metadata = getattr(message, "usage_metadata", None)
+
 
               # Check if this message has tool_calls (can be in AIMessageChunk or AIMessage)
               has_tool_calls = hasattr(message, "tool_calls") and message.tool_calls
@@ -1153,6 +1173,7 @@ class AIPlatformEngineerA2ABinding:
                                           "require_user_input": False,
                                           "content": delta,
                                           "is_final_answer": True,
+                                          "usage_metadata": usage_metadata,
                                       }
 
               # Stream LLM tokens (includes execution plans and responses)
@@ -1303,6 +1324,7 @@ class AIPlatformEngineerA2ABinding:
                                           yield {
                                               **response_format_result,
                                               "from_response_format_tool": True,
+                                              "usage_metadata": usage_metadata,
                                           }
                               else:
                                   text_parts.append(item.get('text', ''))
@@ -1351,6 +1373,7 @@ class AIPlatformEngineerA2ABinding:
                               "is_task_complete": False,
                               "require_user_input": False,
                               "content": content,
+                              "usage_metadata": usage_metadata,
                           }
                       else:
                           if not _final_answer_seen:
@@ -1381,6 +1404,7 @@ class AIPlatformEngineerA2ABinding:
                                           "require_user_input": False,
                                           "content": to_yield,
                                           "is_narration": True,
+                                          "usage_metadata": usage_metadata,
                                       }
                                   continue
                           # Strip leading newlines from first post-marker
@@ -1397,6 +1421,7 @@ class AIPlatformEngineerA2ABinding:
                                   "require_user_input": False,
                                   "content": content,
                                   "is_final_answer": True,
+                                  "usage_metadata": usage_metadata,
                               }
 
               # Handle AIMessage with tool calls (tool start indicators)
@@ -1658,6 +1683,17 @@ class AIPlatformEngineerA2ABinding:
                   elif tool_name in rag_tool_names:
                       # For RAG tools, suppress raw content from stream (client uses tool_call notification)
                       logging.debug(f"Suppressing tool content for {tool_name} (tool_call notification already sent)")
+                      # patch for RAG context
+                      if tool_content and tool_content.strip():
+                          yield {
+                              "is_task_complete": False,
+                              "require_user_input": False,
+                              "artifact": {
+                                  "name": "rag_context",
+                                  "description": f"Raw RAG context from {tool_name}",
+                                  "text": tool_content,
+                              }
+                          }
                   # Stream other tool content as a tool notification (not chat text)
                   # During self-service workflows, suppress intermediate tool output —
                   # the final structured response will contain a clean summary
@@ -2135,6 +2171,31 @@ class AIPlatformEngineerA2ABinding:
                       break
               final_response['final_model_content'] = clean_content
               logging.info(f"📤 Attached final_model_content ({len(clean_content)} chars) for executor final_result")
+
+      # Extract total usage metadata from all AIMessages in the graph state history
+      try:
+          state_obj = await self.graph.aget_state(config)
+          if state_obj and state_obj.values and 'messages' in state_obj.values:
+              total_input = 0
+              total_output = 0
+              total_tot = 0
+              has_usage = False
+              for msg in state_obj.values['messages']:
+                  usage = getattr(msg, "usage_metadata", None)
+                  if usage:
+                      has_usage = True
+                      total_input += usage.get('input_tokens', 0)
+                      total_output += usage.get('output_tokens', 0)
+                      total_tot += usage.get('total_tokens', 0)
+              if has_usage:
+                  final_response['usage_metadata'] = {
+                      'input_tokens': total_input,
+                      'output_tokens': total_output,
+                      'total_tokens': total_tot
+                  }
+                  logging.info(f"📤 Attached total usage_metadata {final_response['usage_metadata']} for executor final_result")
+      except Exception as e:
+          logging.warning(f"Failed to extract total usage metadata from graph history: {e}")
 
       # Dedup: clear streaming content when it was already streamed to the client.
       # The final_model_content field (above) is NOT cleared — the executor uses

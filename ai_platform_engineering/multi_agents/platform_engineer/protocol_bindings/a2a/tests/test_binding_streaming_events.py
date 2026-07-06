@@ -404,5 +404,58 @@ class TestEventOrdering(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(statuses[0].final)
 
 
+# ===================================================================
+# Test Token Usage Propagation
+# ===================================================================
+
+class TestTokenUsagePropagation(unittest.IsolatedAsyncioTestCase):
+    """Token usage metadata is propagated to streaming chunks, final_result, and completion statuses."""
+
+    async def test_streaming_chunk_propagates_token_usage(self):
+        executor = _make_executor()
+        state = StreamState()
+        task = _make_task()
+        eq = _make_event_queue()
+
+        usage = {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+        await executor._handle_streaming_chunk(
+            {"usage_metadata": usage},
+            state,
+            "Chunk content",
+            task,
+            eq,
+        )
+
+        artifacts = _extract_artifacts(executor)
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].artifact.name, "streaming_result")
+        self.assertEqual(artifacts[0].artifact.metadata.get("usage_metadata"), usage)
+
+    async def test_task_complete_propagates_token_usage(self):
+        executor = _make_executor()
+        state = StreamState()
+        task = _make_task()
+        eq = _make_event_queue()
+
+        usage = {"input_tokens": 50, "output_tokens": 100, "total_tokens": 150}
+        await executor._handle_task_complete(
+            {"is_task_complete": True, "usage_metadata": usage},
+            state,
+            "Final content",
+            task,
+            eq,
+        )
+
+        artifacts = _extract_artifacts(executor)
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].artifact.name, "final_result")
+        self.assertEqual(artifacts[0].artifact.metadata.get("usage_metadata"), usage)
+
+        statuses = _extract_status_events(executor)
+        self.assertEqual(len(statuses), 1)
+        self.assertEqual(statuses[0].status.state, TaskState.completed)
+        self.assertEqual(statuses[0].metadata.get("usage_metadata"), usage)
+
+
 if __name__ == '__main__':
     unittest.main()
