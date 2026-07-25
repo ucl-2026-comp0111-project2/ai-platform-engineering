@@ -150,7 +150,6 @@ class SitemapCrawlSpider(SitemapSpider):
     try:
       # Use parser registry to extract content
       result = ParserRegistry.parse(response)
-
       yield ScrapedPageItem(
         url=response.url,
         content=result.content,
@@ -158,6 +157,7 @@ class SitemapCrawlSpider(SitemapSpider):
         description=result.description,
         language=result.language,
         generator=result.generator,
+        images=result.images,
       )
 
     except Exception as e:

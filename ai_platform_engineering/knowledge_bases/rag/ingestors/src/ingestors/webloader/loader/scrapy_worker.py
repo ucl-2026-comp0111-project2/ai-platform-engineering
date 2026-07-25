@@ -17,6 +17,7 @@ install_reactor("twisted.internet.asyncioreactor.AsyncioSelectorReactor")
 
 import hashlib
 import ipaddress
+import json
 import logging
 import re
 import sys
@@ -58,7 +59,7 @@ class SSRFProtectionMiddleware:
   def process_request(self, request: Request, spider):
     # assisted-by claude code claude-sonnet-4-6
     is_safe, reason = is_publicly_routable_url(request.url)
-    if is_safe or getattr(spider, "allow_non_public_urls", False):
+    if is_safe:
       return None
 
     error_msg = f"Blocked unsafe crawl URL because it must resolve only to publicly routable IP addresses ({reason}): {request.url}"
@@ -97,7 +98,6 @@ class WorkerSpider(Spider):
     self.follow_external = request.follow_external_links
     self.allowed_patterns = request.allowed_url_patterns or []
     self.denied_patterns = request.denied_url_patterns or []
-    self.allow_non_public_urls = request.allow_non_public_urls or False
 
     # Track the effective domain (may change after redirect for sitemap mode)
     self.effective_domain: str | None = None
@@ -160,14 +160,18 @@ class WorkerSpider(Spider):
         Meta dict for Request objects
     """
     meta = dict(extra_meta)
-
     if self.crawl_request.render_javascript:
       from scrapy_playwright.page import PageMethod
-
       # Enable Playwright for this request
       meta["playwright"] = True
       meta["playwright_include_page"] = False  # Don't need page object in callback
-
+      # Use a lighter wait condition for the initial navigation. The default
+      # ("load") waits for ALL page resources (analytics, ads, chat widgets,
+      # etc.) to finish, which can time out on heavy modern sites even when
+      # the actual content has long since rendered. "domcontentloaded" fires
+      # once the HTML/DOM is parsed; the networkidle PageMethod below still
+      # waits for dynamic content afterward.
+      meta["playwright_page_goto_kwargs"] = {"wait_until": "domcontentloaded"}
       # Build page methods for waiting
       page_methods = []
       if self.crawl_request.wait_for_selector:
@@ -208,7 +212,7 @@ class WorkerSpider(Spider):
       return True
 
     is_safe, reason = is_publicly_routable_url(url)
-    if is_safe or self.allow_non_public_urls:
+    if is_safe:
       return True
 
     error_msg = f"Blocked unsafe crawl URL because it must resolve only to publicly routable IP addresses ({reason}): {url}"
@@ -583,6 +587,10 @@ class WorkerSpider(Spider):
               "source": response.url,
               "language": result.language or "",
               "generator": result.generator or "",
+              # Serialized as JSON string: Milvus's dynamic fields do not
+              # reliably support storing a list of nested objects (dicts).
+              # Parse this back with json.loads() when reading downstream.
+              "images": json.dumps(result.images) if result.images else "",
             },
           },
         }

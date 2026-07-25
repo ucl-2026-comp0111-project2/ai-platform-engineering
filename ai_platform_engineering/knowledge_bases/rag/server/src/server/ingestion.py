@@ -1,6 +1,8 @@
+import hashlib
 import time
 import traceback
 from typing import List, Optional, Tuple
+
 from common import utils
 from langchain_core.documents import Document
 from common.models.rag import DocumentChunkMetadata, DocumentMetadata, StructuredEntity
@@ -16,7 +18,7 @@ class DocumentProcessor:
   # Milvus varchar field limit (65535 bytes, using 60000 to be safe with UTF-8 encoding)
   MILVUS_MAX_VARCHAR_LENGTH = 60000
 
-  def __init__(self, vstore: Milvus, job_manager: JobManager, graph_rag_enabled: bool, data_graph_db: Optional[GraphDB] = None, max_property_length: int = 250, batch_size: int = 1000):
+  def __init__(self, vstore: Milvus, job_manager: JobManager, graph_rag_enabled: bool, data_graph_db: Optional[GraphDB] = None, max_property_length: int = 250, batch_size: int = 1000, image_vstore: Optional[Milvus] = None):
     """
     Args:
         vstore: Milvus instance
@@ -25,8 +27,12 @@ class DocumentProcessor:
         data_graph_db: GraphDB instance
         max_property_length: Maximum length for property values for structured entities
         batch_size: Batch size for ingestion into vector database
+        image_vstore: Optional Milvus instance for storing image embeddings
+            (pre-embedding ingestion). If not provided, images found in
+            document metadata are skipped rather than embedded.
     """
     self.vstore = vstore
+    self.image_vstore = image_vstore
     self.data_graph_db = data_graph_db
     self.graph_rag_enabled = graph_rag_enabled
     self.job_manager = job_manager
@@ -799,13 +805,10 @@ class DocumentProcessor:
       try:
         # Update job message
         await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Adding {len(deduped_chunks)} document chunks to vector database")
-
         await self.vstore.aupsert(documents=deduped_chunks, ids=deduped_chunk_ids, batch_size=self.batch_size)
         self.logger.info(f"Successfully added {len(deduped_chunks)} chunks to vector database")
-
         # Track chunk count
         await self.job_manager.increment_chunk_count(job_id, len(deduped_chunks))
-
         # Update job with success message
         await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Added {len(deduped_chunks)} document chunks to vector database")
       except Exception as e:
@@ -814,6 +817,11 @@ class DocumentProcessor:
         self.logger.error(traceback.format_exc())
         await self.job_manager.add_error_msg(job_id, error_msg)
         raise
+
+    # Step 3b: Extract images from documents and store their embeddings
+    # (pre-embedding ingestion). Skipped entirely if image_vstore is not configured.
+    if self.image_vstore is not None:
+      await self._ingest_images(documents=documents, job_id=job_id)
 
     # Step 4: Add structured entities to graph database in one batch
     if all_entities and self.data_graph_db:
@@ -842,3 +850,47 @@ class DocumentProcessor:
     completion_msg = f"[Server] Ingestion complete: {len(deduped_chunks) if all_chunks else 0} document chunks, {total_entities} structured entities"
     self.logger.info(completion_msg)
     await self.job_manager.upsert_job(job_id=job_id, message=completion_msg)
+
+  async def _ingest_images(self, documents: List[Document], job_id: str) -> None:
+    """
+    Extract image URLs from document metadata and store their embeddings
+    in the image vector store. Failures for individual images are logged
+    and skipped rather than failing the whole ingestion job, since image
+    embedding is a best-effort enhancement, not a required step.
+
+    Args:
+        documents: The original (unchunked) documents, whose metadata may
+            contain an "images" list, as produced by the webloader ingestor.
+        job_id: ID of the ingestion job, for logging/progress updates.
+    """
+    image_docs = []
+    image_ids = []
+    for doc in documents:
+      images = doc.metadata.get("images") or []
+      if not images:
+        continue
+      for image in images:
+        image_url = image.get("url")
+        if not image_url:
+          continue
+        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": doc.metadata.get("source", "")}))
+        url_hash = hashlib.md5(image_url.encode()).hexdigest()[:12]
+        image_ids.append(f"img_{url_hash}")
+
+    if not image_docs:
+      return
+
+    self.logger.info(f"Embedding {len(image_docs)} images found in ingested documents")
+    await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Embedding {len(image_docs)} images")
+
+    successful = 0
+    for doc, doc_id in zip(image_docs, image_ids):
+      try:
+        await self.image_vstore.aupsert(documents=[doc], ids=[doc_id], batch_size=1)
+        successful += 1
+      except Exception as e:
+        self.logger.warning(f"Failed to embed image {doc.page_content}: {e}")
+        continue
+
+    self.logger.info(f"Successfully embedded {successful}/{len(image_docs)} images")
+    await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Embedded {successful}/{len(image_docs)} images")

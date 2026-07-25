@@ -3,20 +3,18 @@ Base parser interface for content extraction.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 from scrapy.http import Response
-
-
 @dataclass
 class ParseResult:
   """Result of parsing a webpage."""
-
   content: str
   title: str
   description: str
   language: str
   generator: Optional[str] = None
+  images: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class BaseParser(ABC):

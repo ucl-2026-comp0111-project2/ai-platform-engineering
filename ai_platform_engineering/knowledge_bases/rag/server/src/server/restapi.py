@@ -69,6 +69,8 @@ from common.graph_db.neo4j.graph_db import Neo4jDB
 from common.graph_db.base import GraphDB
 from common.constants import DATASOURCE_ID_KEY, WEBLOADER_INGESTOR_REDIS_QUEUE, WEBLOADER_INGESTOR_NAME, WEBLOADER_INGESTOR_TYPE, CONFLUENCE_INGESTOR_REDIS_QUEUE, CONFLUENCE_INGESTOR_NAME, CONFLUENCE_INGESTOR_TYPE, DEFAULT_DATA_LABEL, DEFAULT_SCHEMA_LABEL
 from common.embeddings_factory import EmbeddingsFactory
+from common.multimodal_embeddings import NovaMultimodalEmbeddingsAdapter
+
 import redis.asyncio as redis
 from langchain_milvus import BM25BuiltInFunction, Milvus
 from pymilvus import MilvusClient
@@ -121,6 +123,8 @@ max_results_per_query = int(os.getenv("MAX_RESULTS_PER_QUERY", 100))  # max resu
 confluence_url = os.getenv("CONFLUENCE_URL")  # optional - base URL for Confluence instance (e.g., https://company.atlassian.net/wiki)
 
 default_collection_name_docs = "rag_default"
+default_collection_name_images = "rag_images"
+
 dense_index_params = {"index_type": "HNSW", "metric_type": "COSINE"}
 sparse_index_params = {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25"}
 
@@ -307,7 +311,7 @@ async def app_lifespan(app: FastAPI):
         logger.info("Shutdown interrupted by user (Ctrl+C)")
       raise e
 
-  # Setup vector db for document data
+ # Setup vector db for document data
   vector_db = Milvus(
     embedding_function=embeddings,
     collection_name=default_collection_name_docs,
@@ -317,7 +321,6 @@ async def app_lifespan(app: FastAPI):
     vector_field=["dense", "sparse"],
     enable_dynamic_field=True,  # allow for dynamic metadata fields
   )
-
   # Ensure the collection exists (required for upsert operations)
   # The Milvus langchain wrapper only auto-creates collections on add_documents, not upsert
   if not vector_db.client.has_collection(default_collection_name_docs):
@@ -330,8 +333,31 @@ async def app_lifespan(app: FastAPI):
     logger.info(f"Collection {default_collection_name_docs} created successfully")
   else:
     logger.info(f"Collection {default_collection_name_docs} already exists")
-
   vector_db_query_service = VectorDBQueryService(vector_db=vector_db)
+
+  # Setup a separate vector db for image embeddings (pre-embedding ingestion).
+  # Uses a different embedding dimension than the text collection, so it
+  # cannot share the same Milvus collection/schema.
+  global image_vector_db
+  image_embeddings = NovaMultimodalEmbeddingsAdapter()
+  image_vector_db = Milvus(
+    embedding_function=image_embeddings,
+    collection_name=default_collection_name_images,
+    connection_args=milvus_connection_args,
+    auto_id=True,
+    enable_dynamic_field=True,
+  )
+  if not image_vector_db.client.has_collection(default_collection_name_images):
+    logger.info(f"Collection {default_collection_name_images} does not exist, creating it...")
+    try:
+      dummy_image_doc = Document(page_content="https://example.com/init.png", metadata={"_init": True})
+      image_vector_db.add_documents(documents=[dummy_image_doc], ids=["__init_image_doc__"])
+      image_vector_db.delete(ids=["__init_image_doc__"])
+      logger.info(f"Collection {default_collection_name_images} created successfully")
+    except Exception as e:
+      logger.warning(f"Skipping image collection initialization (will be created on first real image ingestion): {e}")
+  else:
+    logger.info(f"Collection {default_collection_name_images} already exists")
 
   if graph_rag_enabled:
     # Setup graph dbs - both use the same Neo4j instance with different tenant labels
@@ -341,11 +367,11 @@ async def app_lifespan(app: FastAPI):
     await ontology_graph_db.setup()
 
     # setup ingestor with graph db
-    ingestor = DocumentProcessor(vstore=vector_db, graph_rag_enabled=graph_rag_enabled, job_manager=jobmanager, data_graph_db=data_graph_db, batch_size=max_documents_per_ingest)
+    ingestor = DocumentProcessor(vstore=vector_db, graph_rag_enabled=graph_rag_enabled, job_manager=jobmanager, data_graph_db=data_graph_db, batch_size=max_documents_per_ingest, image_vstore=image_vector_db)
+  
   else:
     # setup ingestor without graph db
-    ingestor = DocumentProcessor(vstore=vector_db, job_manager=jobmanager, graph_rag_enabled=graph_rag_enabled, batch_size=max_documents_per_ingest)
-
+    ingestor = DocumentProcessor(vstore=vector_db, job_manager=jobmanager, graph_rag_enabled=graph_rag_enabled, batch_size=max_documents_per_ingest, image_vstore=image_vector_db)
   # Start periodic cleanup background task
   global cleanup_task
   if cleanup_enabled:
@@ -1501,7 +1527,7 @@ async def ingest_url(
   logger.info(f"Received URL ingestion request: {url_request.url}")
 
   # Sanitize URL
-  sanitized_url = sanitize_url(url_request.url, url_request.settings.allow_non_public_urls)
+  sanitized_url = sanitize_url(url_request.url)
   url_request.url = sanitized_url
 
   # Generate datasource ID and create datasource

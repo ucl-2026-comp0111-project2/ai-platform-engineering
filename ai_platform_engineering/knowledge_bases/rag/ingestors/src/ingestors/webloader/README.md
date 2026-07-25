@@ -74,12 +74,13 @@ In addition to `ScrapySettings`, the URL ingestion request supports:
 ```
 
 ## Features
-
 ### 1. URL Ingestion
 - Crawls web pages and extracts text content
 - Chunks content for optimal retrieval
 - Extracts metadata (title, description, etc.)
 - Stores documents with source URL tracking
+- Extracts images found on each page (URL and alt text) alongside text
+  content; see "Image Extraction & Embedding" below
 
 ### 2. Crawl Modes
 - **Single URL**: Scrape only the specified URL
@@ -148,6 +149,25 @@ Documents are sent to the RAG server **as they are crawled**, rather than waitin
 ### 8. Redirect Handling
 
 When crawling sites that redirect (e.g., `caipe.io` → `cnoe-io.github.io`), the crawler automatically updates its domain filtering to follow links on the **destination domain**, not the original URL. This ensures recursive crawling works correctly through redirects.
+
+## Image Extraction & Embedding
+
+In addition to text content, the Webloader extracts `<img>` tags found on
+each crawled page, capturing each image's URL (resolved to an absolute URL)
+and alt text. These are carried through ingestion as document metadata and,
+when the RAG server is configured with an image vector store, embedded at
+ingestion time (pre-embedding) using Amazon's Nova 2 Multimodal Embeddings
+model 
+
+This is independent of the webloader's own environment variables; it is
+configured on the RAG server side. See `common/multimodal_embeddings.py`
+for details. :
+
+- `LITELLM_API_BASE` - Base URL of the LiteLLM proxy
+- `LITELLM_API_KEY` - API key for the LiteLLM proxy
+
+If these are not set, image embedding is skipped and only the image URL/alt
+text metadata is preserved (no failure).
 
 ## Running with Docker Compose
 

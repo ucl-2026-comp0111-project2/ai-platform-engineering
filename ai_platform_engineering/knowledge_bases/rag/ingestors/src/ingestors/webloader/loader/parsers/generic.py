@@ -95,7 +95,34 @@ class GenericParser(BaseParser):
       description=cls._get_description(response),
       language=cls._get_language(response),
       generator=cls._get_generator(response),
+      images=cls._extract_images(response),
     )
+
+  @classmethod
+  def _extract_images(cls, response: Response) -> list[dict]:
+    """
+    Extract image URLs and alt text from the page.
+
+    Skips images with no src attribute, and resolves relative
+    URLs (e.g. "/img/logo.png") into absolute URLs using the
+    page's own URL as the base.
+
+    Args:
+        response: Scrapy Response object
+
+    Returns:
+        List of dicts, each with "url" and "alt_text" keys.
+    """
+    images = []
+    all_img_tags = response.css("img")
+    for img in all_img_tags:
+      src = img.attrib.get("src")
+      if not src:
+        continue
+      absolute_url = response.urljoin(src)
+      alt_text = img.attrib.get("alt", "")
+      images.append({"url": absolute_url, "alt_text": alt_text})
+    return images
 
   @classmethod
   def _extract_from_element(cls, element) -> str:

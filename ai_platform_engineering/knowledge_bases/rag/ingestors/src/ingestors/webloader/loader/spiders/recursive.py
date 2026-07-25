@@ -211,7 +211,6 @@ class RecursiveCrawlSpider(CrawlSpider):
     try:
       # Use parser registry to extract content
       result = ParserRegistry.parse(response)
-
       yield ScrapedPageItem(
         url=response.url,
         content=result.content,
@@ -219,6 +218,7 @@ class RecursiveCrawlSpider(CrawlSpider):
         description=result.description,
         language=result.language,
         generator=result.generator,
+        images=result.images,
       )
 
     except Exception as e:
