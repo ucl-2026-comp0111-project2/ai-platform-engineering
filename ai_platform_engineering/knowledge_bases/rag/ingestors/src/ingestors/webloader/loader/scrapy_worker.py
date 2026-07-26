@@ -182,13 +182,15 @@ class WorkerSpider(Spider):
             timeout=self.crawl_request.page_load_timeout * 1000,
           )
         )
-      # Wait for network idle to ensure dynamic content is loaded
+      # Use a fixed wait instead of "networkidle": some sites (analytics,
+      # chat widgets, live telemetry) never go fully network-idle, which
+      # causes "networkidle" to time out and fail the entire crawl (a
+      # known scrapy-playwright limitation - see
+      # github.com/scrapy-plugins/scrapy-playwright/issues/106). A fixed
+      # wait always completes, giving dynamic content (e.g. lazy-loaded
+      # images) time to render without depending on network silence.
       page_methods.append(
-        PageMethod(
-          "wait_for_load_state",
-          "networkidle",
-          timeout=self.crawl_request.page_load_timeout * 1000,
-        )
+        PageMethod("wait_for_timeout", 5000)
       )
 
       if page_methods:
