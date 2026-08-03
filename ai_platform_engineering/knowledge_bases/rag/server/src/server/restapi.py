@@ -344,7 +344,7 @@ async def app_lifespan(app: FastAPI):
     embedding_function=image_embeddings,
     collection_name=default_collection_name_images,
     connection_args=milvus_connection_args,
-    auto_id=True,
+    auto_id=False,
     enable_dynamic_field=True,
   )
   if not image_vector_db.client.has_collection(default_collection_name_images):

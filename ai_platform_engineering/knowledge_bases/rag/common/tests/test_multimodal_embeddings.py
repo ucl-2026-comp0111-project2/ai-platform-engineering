@@ -1,6 +1,7 @@
 """
 Tests for NovaMultimodalEmbedder (multimodal_embeddings.py)
 """
+import base64
 import os
 import pytest
 import requests
@@ -9,6 +10,7 @@ from unittest.mock import patch, MagicMock
 from common.multimodal_embeddings import (
   NovaMultimodalEmbedder,
   ImageDownloadError,
+  ImageReadError,
   UnsupportedImageFormatError,
 )
 
@@ -170,3 +172,52 @@ class TestEmbedImageUrl:
       with patch("common.multimodal_embeddings.requests.post", return_value=mock_proxy_response):
         with pytest.raises(RuntimeError, match="Unexpected response format"):
           embedder.embed_image_url("https://example.com/photo.jpg")
+
+class TestEmbedLocalImage:
+  """Test suite for local image embedding used by live query-side search."""
+
+  def _make_embedder(self):
+    return NovaMultimodalEmbedder(api_base="https://proxy.example.com/v1", api_key="test-key")
+
+  def test_embed_image_path_reads_local_file_and_calls_proxy(self, tmp_path):
+    """Test that local image bytes are encoded and sent to the same Nova endpoint."""
+    image_path = tmp_path / "query.png"
+    image_bytes = b"fake-local-image-bytes"
+    image_path.write_bytes(image_bytes)
+
+    fake_embedding = [0.4, 0.5, 0.6]
+    mock_proxy_response = MagicMock()
+    mock_proxy_response.raise_for_status = MagicMock()
+    mock_proxy_response.json.return_value = {"data": [{"embedding": fake_embedding}]}
+
+    embedder = self._make_embedder()
+    with patch("common.multimodal_embeddings.requests.get") as mock_get:
+      with patch("common.multimodal_embeddings.requests.post", return_value=mock_proxy_response) as mock_post:
+        result = embedder.embed_image_path(image_path)
+
+    assert result == fake_embedding
+    mock_get.assert_not_called()
+    mock_post.assert_called_once()
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["model"] == "bedrock/amazon.nova-2-multimodal-embeddings-v1:0"
+    assert payload["encoding_format"] == "base64"
+    assert payload["input"] == base64.b64encode(image_bytes).decode("utf-8")
+
+  def test_embed_image_path_missing_file_raises_image_read_error(self, tmp_path):
+    """Test that missing local image files fail clearly before calling LiteLLM."""
+    embedder = self._make_embedder()
+    with patch("common.multimodal_embeddings.requests.post") as mock_post:
+      with pytest.raises(ImageReadError, match="Image file does not exist"):
+        embedder.embed_image_path(tmp_path / "missing.png")
+      mock_post.assert_not_called()
+
+  def test_embed_image_path_unsupported_extension_raises_before_read(self, tmp_path):
+    """Test that unsupported local image formats are rejected before reading."""
+    image_path = tmp_path / "diagram.svg"
+    image_path.write_text("<svg />", encoding="utf-8")
+
+    embedder = self._make_embedder()
+    with patch("common.multimodal_embeddings.requests.post") as mock_post:
+      with pytest.raises(UnsupportedImageFormatError):
+        embedder.embed_image_path(image_path)
+      mock_post.assert_not_called()

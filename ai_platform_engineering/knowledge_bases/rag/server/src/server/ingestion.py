@@ -1,4 +1,5 @@
 import hashlib
+import json
 import time
 import traceback
 from typing import List, Optional, Tuple
@@ -866,14 +867,22 @@ class DocumentProcessor:
     image_docs = []
     image_ids = []
     for doc in documents:
-      images = doc.metadata.get("images") or []
+      custom_metadata = doc.metadata.get("metadata") or {}
+      images = doc.metadata.get("images") or custom_metadata.get("images") or []
       if not images:
         continue
+      if isinstance(images, str):
+        try:
+          images = json.loads(images)
+        except json.JSONDecodeError as e:
+          self.logger.warning(f"Skipping malformed image metadata: {e}")
+          continue
       for image in images:
         image_url = image.get("url")
         if not image_url:
           continue
-        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": doc.metadata.get("source", "")}))
+        source_document = doc.metadata.get("source") or custom_metadata.get("source", "")
+        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": source_document}))
         url_hash = hashlib.md5(image_url.encode()).hexdigest()[:12]
         image_ids.append(f"img_{url_hash}")
 
@@ -886,7 +895,10 @@ class DocumentProcessor:
     successful = 0
     for doc, doc_id in zip(image_docs, image_ids):
       try:
-        await self.image_vstore.aupsert(documents=[doc], ids=[doc_id], batch_size=1)
+        if self.image_vstore.client.has_collection("rag_images"):
+          await self.image_vstore.aupsert(documents=[doc], ids=[doc_id], batch_size=1)
+        else:
+          await self.image_vstore.aadd_documents(documents=[doc], ids=[doc_id])
         successful += 1
       except Exception as e:
         self.logger.warning(f"Failed to embed image {doc.page_content}: {e}")
