@@ -69,11 +69,11 @@ from common.graph_db.neo4j.graph_db import Neo4jDB
 from common.graph_db.base import GraphDB
 from common.constants import DATASOURCE_ID_KEY, WEBLOADER_INGESTOR_REDIS_QUEUE, WEBLOADER_INGESTOR_NAME, WEBLOADER_INGESTOR_TYPE, CONFLUENCE_INGESTOR_REDIS_QUEUE, CONFLUENCE_INGESTOR_NAME, CONFLUENCE_INGESTOR_TYPE, DEFAULT_DATA_LABEL, DEFAULT_SCHEMA_LABEL
 from common.embeddings_factory import EmbeddingsFactory
-from common.multimodal_embeddings import NovaMultimodalEmbeddingsAdapter
+from common.multimodal_embeddings import MultimodalEmbeddingsAdapter, MultimodalEmbeddingsFactory
 
 import redis.asyncio as redis
 from langchain_milvus import BM25BuiltInFunction, Milvus
-from pymilvus import MilvusClient
+from pymilvus import MilvusClient, DataType
 import time
 import os
 import httpx
@@ -104,6 +104,8 @@ clean_up_interval = int(os.getenv("CLEANUP_INTERVAL", 3 * 60 * 60))  # Default t
 cleanup_enabled = os.getenv("CLEANUP_ENABLED", "true").lower() in ("true", "1", "yes")
 ontology_agent_client = httpx.AsyncClient(base_url=os.getenv("ONTOLOGY_AGENT_RESTAPI_ADDR", "http://localhost:8098"))
 graph_rag_enabled = os.getenv("ENABLE_GRAPH_RAG", "true").lower() in ("true", "1", "yes")
+image_embedding_enabled = os.getenv("ENABLE_IMAGE_EMBEDDING", "true").lower() in ("true", "1", "yes")
+
 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 milvus_uri = os.getenv("MILVUS_URI", "http://localhost:19530")
 embeddings_model = os.getenv("EMBEDDINGS_MODEL", "text-embedding-3-small")
@@ -334,31 +336,37 @@ async def app_lifespan(app: FastAPI):
   else:
     logger.info(f"Collection {default_collection_name_docs} already exists")
   vector_db_query_service = VectorDBQueryService(vector_db=vector_db)
-
   # Setup a separate vector db for image embeddings (pre-embedding ingestion).
   # Uses a different embedding dimension than the text collection, so it
   # cannot share the same Milvus collection/schema.
-  global image_vector_db
-  image_embeddings = NovaMultimodalEmbeddingsAdapter()
-  image_vector_db = Milvus(
-    embedding_function=image_embeddings,
-    collection_name=default_collection_name_images,
-    connection_args=milvus_connection_args,
-    auto_id=True,
-    enable_dynamic_field=True,
-  )
-  if not image_vector_db.client.has_collection(default_collection_name_images):
-    logger.info(f"Collection {default_collection_name_images} does not exist, creating it...")
-    try:
-      dummy_image_doc = Document(page_content="https://example.com/init.png", metadata={"_init": True})
-      image_vector_db.add_documents(documents=[dummy_image_doc], ids=["__init_image_doc__"])
-      image_vector_db.delete(ids=["__init_image_doc__"])
-      logger.info(f"Collection {default_collection_name_images} created successfully")
-    except Exception as e:
-      logger.warning(f"Skipping image collection initialization (will be created on first real image ingestion): {e}")
+  if image_embedding_enabled:
+    global image_vector_db
+    image_embeddings = MultimodalEmbeddingsAdapter()
+    image_vector_db = Milvus(
+      embedding_function=image_embeddings,
+      collection_name=default_collection_name_images,
+      connection_args=milvus_connection_args,
+      auto_id=False,
+      enable_dynamic_field=True,
+    )
+    if not image_vector_db.client.has_collection(default_collection_name_images):
+      logger.info(f"Collection {default_collection_name_images} does not exist, creating it...")
+      try:
+        embedding_dimension = MultimodalEmbeddingsFactory.get_embedding_dimension()
+        schema = image_vector_db.client.create_schema(auto_id=False, enable_dynamic_field=True)
+        schema.add_field(field_name="pk", datatype=DataType.VARCHAR, is_primary=True, max_length=64)
+        schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=embedding_dimension)
+        index_params = image_vector_db.client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="COSINE")
+        image_vector_db.client.create_collection(collection_name=default_collection_name_images, schema=schema, index_params=index_params)
+        logger.info(f"Collection {default_collection_name_images} created successfully")
+      except Exception as e:
+        logger.warning(f"Failed to create image collection (will be created on first real image ingestion): {e}")
+    else:
+      logger.info(f"Collection {default_collection_name_images} already exists")
   else:
-    logger.info(f"Collection {default_collection_name_images} already exists")
-
+    image_vector_db = None
+    logger.info("Image embedding disabled via ENABLE_IMAGE_EMBEDDING")
   if graph_rag_enabled:
     # Setup graph dbs - both use the same Neo4j instance with different tenant labels
     data_graph_db = Neo4jDB(tenant_label=DEFAULT_DATA_LABEL, uri=neo4j_addr)
@@ -1527,7 +1535,7 @@ async def ingest_url(
   logger.info(f"Received URL ingestion request: {url_request.url}")
 
   # Sanitize URL
-  sanitized_url = sanitize_url(url_request.url)
+  sanitized_url = sanitize_url(url_request.url, url_request.settings.allow_non_public_urls)
   url_request.url = sanitized_url
 
   # Generate datasource ID and create datasource

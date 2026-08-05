@@ -169,6 +169,11 @@ for details. :
 If these are not set, image embedding is skipped and only the image URL/alt
 text metadata is preserved (no failure).
 
+Images are stored in a separate Milvus collection, `rag_images`, keyed by
+`img_{md5(image_url)[:12]}` (re-crawling updates existing records rather
+than duplicating). Fields: `text` (image URL), `vector` (3072-dim
+embedding), `alt_text`, `source_document`.
+
 ## Running with Docker Compose
 
 The Webloader should be part of your main deployment and have access to the same Redis instance as the RAG server.

@@ -1,18 +1,28 @@
+import asyncio
 import hashlib
+import os
 import time
+import json
 import traceback
 from typing import List, Optional, Tuple
-
 from common import utils
+
+from common.multimodal_embeddings import UnsupportedImageFormatError
+
 from langchain_core.documents import Document
 from common.models.rag import DocumentChunkMetadata, DocumentMetadata, StructuredEntity
 from langchain_milvus import Milvus
 from common.graph_db.base import GraphDB
 from common.job_manager import JobManager
 from common.constants import INGESTOR_ID_KEY, DATASOURCE_ID_KEY, LAST_UPDATED_KEY, FRESH_UNTIL_KEY, PARENT_ENTITY_PK_KEY, PARENT_ENTITY_TYPE_KEY, SUB_ENTITY_INDEX_KEY, SUB_ENTITY_LABEL, ENTITY_TYPE_KEY
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
+# Max images embedded per document, to cap API calls on image-heavy pages
+MAX_IMAGES_PER_DOCUMENT = int(os.getenv("MAX_IMAGES_PER_DOCUMENT", "20"))
+# Max concurrent image embedding requests (network-bound, safe to parallelize)
+IMAGE_EMBED_CONCURRENCY = int(os.getenv("IMAGE_EMBED_CONCURRENCY", "5"))
+# Max attempts per image before giving up (covers transient network/API errors)
+IMAGE_EMBED_MAX_ATTEMPTS = int(os.getenv("IMAGE_EMBED_MAX_ATTEMPTS", "3"))
+IMAGE_EMBED_RETRY_DELAY_SECONDS = float(os.getenv("IMAGE_EMBED_RETRY_DELAY_SECONDS", "1.0"))
 
 class DocumentProcessor:
   # Milvus varchar field limit (65535 bytes, using 60000 to be safe with UTF-8 encoding)
@@ -852,45 +862,113 @@ class DocumentProcessor:
     await self.job_manager.upsert_job(job_id=job_id, message=completion_msg)
 
   async def _ingest_images(self, documents: List[Document], job_id: str) -> None:
-    """
-    Extract image URLs from document metadata and store their embeddings
-    in the image vector store. Failures for individual images are logged
-    and skipped rather than failing the whole ingestion job, since image
-    embedding is a best-effort enhancement, not a required step.
+    """Extract image URLs from document metadata, embed and store new ones."""
+    image_docs, image_ids = self._collect_image_candidates(documents)
+    if not image_docs:
+      return
 
-    Args:
-        documents: The original (unchunked) documents, whose metadata may
-            contain an "images" list, as produced by the webloader ingestor.
-        job_id: ID of the ingestion job, for logging/progress updates.
-    """
-    image_docs = []
-    image_ids = []
+    existing_ids = await self._get_existing_image_ids(image_ids)
+    to_process = [(doc, doc_id) for doc, doc_id in zip(image_docs, image_ids) if doc_id not in existing_ids]
+    skipped = len(image_docs) - len(to_process)
+
+    if not to_process:
+      self.logger.info(f"All {len(image_docs)} images already stored, nothing to embed")
+      return
+
+    self.logger.info(f"Embedding {len(to_process)} new images ({skipped} already stored, skipped)")
+    await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Embedding {len(to_process)} images")
+
+    successful = await self._embed_and_store_images(to_process)
+
+    self.logger.info(f"Successfully embedded {successful}/{len(to_process)} new images ({skipped} already stored)")
+    await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Embedded {successful}/{len(to_process)} images ({skipped} already stored)")
+
+  def _collect_image_candidates(self, documents: List[Document]) -> Tuple[List[Document], List[str]]:
+    """Extract image URLs from document metadata into (image_doc, deterministic_id) pairs."""
+    image_docs: List[Document] = []
+    image_ids: List[str] = []
     for doc in documents:
-      images = doc.metadata.get("images") or []
-      if not images:
-        continue
+      nested_metadata = doc.metadata.get("metadata") or {}
+      images = nested_metadata.get("images") or []
+      if isinstance(images, str):
+        images = json.loads(images)
+      source_url = nested_metadata.get("source", "")
+
+      if len(images) > MAX_IMAGES_PER_DOCUMENT:
+        self.logger.info(f"Capping images for {source_url or 'unknown'}: {len(images)} found, embedding first {MAX_IMAGES_PER_DOCUMENT}")
+        images = images[:MAX_IMAGES_PER_DOCUMENT]
+
       for image in images:
         image_url = image.get("url")
         if not image_url:
           continue
-        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": doc.metadata.get("source", "")}))
-        url_hash = hashlib.md5(image_url.encode()).hexdigest()[:12]
-        image_ids.append(f"img_{url_hash}")
+        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": source_url}))
+        image_ids.append(self._image_id_for_url(image_url))
+    return image_docs, image_ids
 
-    if not image_docs:
-      return
+  @staticmethod
+  def _image_id_for_url(image_url: str) -> str:
+    """Deterministic id so re-embedding the same URL updates rather than duplicates."""
+    url_hash = hashlib.md5(image_url.encode()).hexdigest()[:12]
+    return f"img_{url_hash}"
 
-    self.logger.info(f"Embedding {len(image_docs)} images found in ingested documents")
-    await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Embedding {len(image_docs)} images")
+  async def _get_existing_image_ids(self, image_ids: List[str]) -> set:
+    """Query which of the given ids are already stored, to skip re-embedding unchanged images."""
+    if not image_ids:
+      return set()
+    try:
+      existing = await self.image_vstore.aclient.query(
+        collection_name=self.image_vstore.collection_name,
+        filter=f"pk in [{', '.join(repr(i) for i in image_ids)}]",
+        output_fields=["pk"],
+      )
+      return {row["pk"] for row in existing}
+    except Exception as e:
+      self.logger.warning(f"Could not check existing images, embedding all: {e}")
+      return set()
 
-    successful = 0
-    for doc, doc_id in zip(image_docs, image_ids):
-      try:
-        await self.image_vstore.aupsert(documents=[doc], ids=[doc_id], batch_size=1)
-        successful += 1
-      except Exception as e:
-        self.logger.warning(f"Failed to embed image {doc.page_content}: {e}")
+  async def _embed_and_store_images(self, to_process: List[Tuple[Document, str]]) -> int:
+    """Embed images concurrently (thread pool), then batch-insert pre-computed vectors."""
+    embedder = getattr(self.image_vstore.embeddings, "embedder", None)
+    semaphore = asyncio.Semaphore(IMAGE_EMBED_CONCURRENCY)
+    loop = asyncio.get_event_loop()
+
+    async def embed_bounded(url: str) -> Optional[List[float]]:
+      async with semaphore:
+        return await loop.run_in_executor(None, self._embed_with_retries, embedder, url)
+
+    vectors = await asyncio.gather(*[embed_bounded(doc.page_content) for doc, _ in to_process])
+
+    texts, embeddings, metadatas, ids = [], [], [], []
+    for (doc, doc_id), vector in zip(to_process, vectors):
+      if vector is None:
         continue
+      texts.append(doc.page_content)
+      embeddings.append(vector)
+      metadatas.append(doc.metadata)
+      ids.append(doc_id)
 
-    self.logger.info(f"Successfully embedded {successful}/{len(image_docs)} images")
-    await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Embedded {successful}/{len(image_docs)} images")
+    if not texts:
+      return 0
+
+    try:
+      await self.image_vstore.aadd_embeddings(texts=texts, embeddings=embeddings, metadatas=metadatas, ids=ids)
+      return len(texts)
+    except Exception as e:
+      self.logger.warning(f"Failed to store {len(texts)} embedded images: {e}")
+      return 0
+
+  def _embed_with_retries(self, embedder, url: str) -> Optional[List[float]]:
+    """Runs in a worker thread: plain synchronous HTTP calls, safe to parallelize."""
+    for attempt in range(1, IMAGE_EMBED_MAX_ATTEMPTS + 1):
+      try:
+        return embedder.embed_image_url(url)
+      except UnsupportedImageFormatError as e:
+        self.logger.warning(f"Skipping unsupported image format: {url} ({e})")
+        return None
+      except Exception as e:
+        if attempt >= IMAGE_EMBED_MAX_ATTEMPTS:
+          self.logger.warning(f"Failed to embed image {url} after {attempt} attempts: {e}")
+          return None
+        time.sleep(IMAGE_EMBED_RETRY_DELAY_SECONDS)
+    return None

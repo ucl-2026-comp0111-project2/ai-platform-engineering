@@ -1,12 +1,4 @@
-"""
-Multimodal Embeddings for RAG System.
-
-This module provides image embedding support via Amazon's Nova 2
-Multimodal Embeddings model, accessed through Cisco's LiteLLM proxy,
-used for the pre-embedding ingestion pipeline.
-this module downloads an image from a URL, base64-encodes it, and calls a multimodal embedding
-model through the proxy's OpenAI-compatible /v1/embeddings endpoint.
-"""
+"""Multimodal image embedding providers (Nova, Gemini) via a configurable embeddings API."""
 import base64
 import os
 from typing import List, Optional
@@ -19,166 +11,153 @@ from common.utils import get_logger
 
 logger = get_logger(__name__)
 
-# Model ID as configured on the LiteLLM proxy
-NOVA_MULTIMODAL_MODEL_ID = "bedrock/amazon.nova-2-multimodal-embeddings-v1:0"
-
-# Supported image file extensions (informational; the model itself
-# detects format from the decoded image bytes, not from this value)
 SUPPORTED_IMAGE_FORMATS = {"jpg", "jpeg", "png", "gif", "webp"}
+
+# Model registry: provider name -> (model id on the embeddings proxy, output dimension)
+_PROVIDER_REGISTRY = {
+  "nova": (os.getenv("NOVA_MULTIMODAL_MODEL_ID", "bedrock/amazon.nova-2-multimodal-embeddings-v1:0"), 3072),
+  "gemini": (os.getenv("GEMINI_MULTIMODAL_MODEL_ID", "vertex_ai/gemini-embedding-2"), 3072),
+}
 
 
 class ImageDownloadError(Exception):
-  """Raised when an image cannot be downloaded from its URL."""
+  """Image could not be downloaded."""
   pass
 
 
 class UnsupportedImageFormatError(Exception):
-  """Raised when an image's format cannot be determined or is not supported."""
+  """Image format is missing or not supported."""
   pass
 
 
-class NovaMultimodalEmbedder:
-  """
-  Embeds images using Amazon's Nova 2 Multimodal Embeddings model,
-  accessed through Cisco's LiteLLM proxy.
+def _detect_format(url: str) -> str:
+  """Detect image format from the URL's file extension."""
+  path = urlparse(url).path
+  extension = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+  if extension not in SUPPORTED_IMAGE_FORMATS:
+    raise UnsupportedImageFormatError(f"Unsupported or missing image format for URL: {url} (extension: '{extension}'). Supported: {sorted(SUPPORTED_IMAGE_FORMATS)}")
+  return "jpeg" if extension == "jpg" else extension
 
-  Environment Variables:
-      LITELLM_API_BASE: Base URL of the LiteLLM proxy (required)
-      LITELLM_API_KEY: API key for the proxy (required)
-  """
+
+def _download_image(url: str, timeout: int = 15) -> bytes:
+  """Download raw image bytes from a URL."""
+  try:
+    response = requests.get(url, timeout=timeout, headers={"User-Agent": "CAIPE-Ingestor/1.0"})
+    response.raise_for_status()
+    return response.content
+  except requests.RequestException as e:
+    raise ImageDownloadError(f"Failed to download image from {url}: {e}") from e
+
+
+class BaseMultimodalEmbedder:
+  """Shared request/error handling for multimodal embedding providers."""
+
+  provider_name: str = "base"
+  model_id: str = ""
+  dimension: int = 0
 
   def __init__(self, api_base: Optional[str] = None, api_key: Optional[str] = None):
-    """
-    Args:
-        api_base: Base URL of the LiteLLM proxy. Defaults to the
-            LITELLM_API_BASE environment variable.
-        api_key: API key for the proxy. Defaults to the LITELLM_API_KEY
-            environment variable.
-    Raises:
-        ValueError: If api_base or api_key are not provided and not set
-            in the environment.
-    """
     self.api_base = api_base or os.getenv("LITELLM_API_BASE")
     self.api_key = api_key or os.getenv("LITELLM_API_KEY")
     if not self.api_base:
-      raise ValueError("LITELLM_API_BASE environment variable is required for NovaMultimodalEmbedder")
+      raise ValueError("LITELLM_API_BASE environment variable is required")
     if not self.api_key:
-      raise ValueError("LITELLM_API_KEY environment variable is required for NovaMultimodalEmbedder")
+      raise ValueError("LITELLM_API_KEY environment variable is required")
 
-  def _detect_format(self, url: str) -> str:
-    """
-    Detect the image format from a URL's file extension. Used only for
-    validation before downloading; the model itself detects format from
-    the actual image bytes.
-
-    Args:
-        url: The image URL.
-    Returns:
-        The detected format string (e.g. "jpeg", "png").
-    Raises:
-        UnsupportedImageFormatError: If the extension is missing or not supported.
-    """
-    path = urlparse(url).path
-    extension = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-    if extension not in SUPPORTED_IMAGE_FORMATS:
-      raise UnsupportedImageFormatError(f"Unsupported or missing image format for URL: {url} (extension: '{extension}'). Supported: {sorted(SUPPORTED_IMAGE_FORMATS)}")
-    return "jpeg" if extension == "jpg" else extension
-
-  def _download_image(self, url: str, timeout: int = 15) -> bytes:
-    """
-    Download raw image bytes from a URL.
-
-    Args:
-        url: The image URL.
-        timeout: Request timeout in seconds.
-    Returns:
-        Raw image bytes.
-    Raises:
-        ImageDownloadError: If the download fails for any reason (network error,
-            non-200 status, etc.).
-    """
-    try:
-      response = requests.get(url, timeout=timeout)
-      response.raise_for_status()
-      return response.content
-    except requests.RequestException as e:
-      raise ImageDownloadError(f"Failed to download image from {url}: {e}") from e
+  def _build_payload(self, encoded_image: str, image_format: str) -> dict:
+    raise NotImplementedError
 
   def embed_image_url(self, url: str) -> List[float]:
-    """
-    Download an image from a URL and generate its embedding vector via
-    Cisco's LiteLLM proxy.
-
-    Args:
-        url: The image URL to embed.
-    Returns:
-        The embedding vector as a list of floats.
-    Raises:
-        ImageDownloadError: If the image cannot be downloaded.
-        UnsupportedImageFormatError: If the image format is not supported.
-        RuntimeError: If the proxy call fails or returns an unexpected response.
-    """
-    self._detect_format(url)
-    image_bytes = self._download_image(url)
+    """Download an image and return its embedding vector."""
+    image_format = _detect_format(url)
+    image_bytes = _download_image(url)
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    payload = self._build_payload(encoded_image, image_format)
 
     try:
       response = requests.post(
         f"{self.api_base}/embeddings",
         headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-        json={
-          "model": NOVA_MULTIMODAL_MODEL_ID,
-          "input": encoded_image,
-          "encoding_format": "base64",
-        },
+        json=payload,
         timeout=60,
       )
       response.raise_for_status()
-      response_body = response.json()
-      embedding = response_body["data"][0]["embedding"]
-      logger.info(f"Embedded image via LiteLLM proxy: url={url}, dimension={len(embedding)}")
+      embedding = response.json()["data"][0]["embedding"]
+      logger.info(f"Embedded image via {self.provider_name}: url={url}, dimension={len(embedding)}")
       return embedding
     except requests.RequestException as e:
-      raise RuntimeError(f"LiteLLM proxy request failed for image {url}: {e}") from e
+      raise RuntimeError(f"Embeddings proxy request failed for image {url}: {e}") from e
     except (KeyError, IndexError) as e:
-      raise RuntimeError(f"Unexpected response format from Nova embedding model for {url}: {e}") from e
+      raise RuntimeError(f"Unexpected response format from {self.provider_name} for {url}: {e}") from e
 
 
-class NovaMultimodalEmbeddingsAdapter(Embeddings):
-  """
-  Adapts NovaMultimodalEmbedder to LangChain's Embeddings interface,
-  so it can be used with LangChain's Milvus vector store wrapper the
-  same way text embedding providers are used in embeddings_factory.py.
+class NovaMultimodalEmbedder(BaseMultimodalEmbedder):
+  """Embeds images using Amazon's Nova 2 Multimodal Embeddings model. Manual fallback option; Gemini is the default."""
 
-  Note: "documents" and "query" here are image URLs, not raw text.
-  """
+  provider_name = "Nova"
+  model_id, dimension = _PROVIDER_REGISTRY["nova"]
 
-  def __init__(self, embedder: Optional[NovaMultimodalEmbedder] = None):
-    """
-    Args:
-        embedder: An existing NovaMultimodalEmbedder instance to use.
-            If not provided, a new one is created with default settings.
-    """
-    self.embedder = embedder or NovaMultimodalEmbedder()
+  def _build_payload(self, encoded_image: str, image_format: str) -> dict:
+    return {"model": self.model_id, "input": encoded_image, "encoding_format": "base64"}
+
+
+class GeminiMultimodalEmbedder(BaseMultimodalEmbedder):
+  """Embeds images using Google's Gemini Embedding 2 model. Default provider."""
+
+  provider_name = "Gemini"
+  model_id, dimension = _PROVIDER_REGISTRY["gemini"]
+
+  def _build_payload(self, encoded_image: str, image_format: str) -> dict:
+    mime_type = f"image/{image_format}"
+    data_uri = f"data:{mime_type};base64,{encoded_image}"
+    return {"model": self.model_id, "input": [data_uri]}
+
+
+class MultimodalEmbeddingsFactory:
+  """Selects a multimodal embedder. Defaults to Gemini; Nova available as a manual override."""
+  _EMBEDDERS = {"nova": NovaMultimodalEmbedder, "gemini": GeminiMultimodalEmbedder}
+
+  @classmethod
+  def _get_provider_name(cls) -> str:
+    explicit = os.getenv("MULTIMODAL_EMBEDDINGS_PROVIDER")
+    if explicit:
+      provider = explicit.lower()
+      if provider not in cls._EMBEDDERS:
+        raise ValueError(f"Unsupported multimodal embeddings provider: '{provider}'. Supported: {sorted(cls._EMBEDDERS)}")
+      return provider
+
+        # No explicit override: follow the text embedding model, when possible.
+    from common.embeddings_factory import EmbeddingsFactory
+    text_identifier = EmbeddingsFactory.get_provider_identifier().lower()
+    for provider_name in cls._EMBEDDERS:
+      if provider_name in text_identifier:
+        return provider_name
+
+    # Text model has no image-capable equivalent . Default to
+    # gemini rather than block startup; incompatible embed attempts fail
+    # individually and get logged, same as any other embed failure.
+    return "gemini"
+  @classmethod
+  def get_embedder(cls) -> BaseMultimodalEmbedder:
+    return cls._EMBEDDERS[cls._get_provider_name()]()
+
+  @classmethod
+  def get_embedding_dimension(cls) -> int:
+    return cls._EMBEDDERS[cls._get_provider_name()].dimension
+
+
+class MultimodalEmbeddingsAdapter(Embeddings):
+  """Adapts a multimodal embedder to LangChain's Embeddings interface."""
+
+  def __init__(self, embedder: Optional[BaseMultimodalEmbedder] = None):
+    self.embedder = embedder or MultimodalEmbeddingsFactory.get_embedder()
 
   def embed_documents(self, texts: List[str]) -> List[List[float]]:
-    """
-    Embed a list of image URLs.
-
-    Args:
-        texts: A list of image URLs (despite the LangChain parameter name).
-    Returns:
-        A list of embedding vectors, one per URL.
-    """
     return [self.embedder.embed_image_url(url) for url in texts]
 
   def embed_query(self, text: str) -> List[float]:
-    """
-    Embed a single image URL for querying.
-
-    Args:
-        text: An image URL (despite the LangChain parameter name).
-    Returns:
-        The embedding vector.
-    """
     return self.embedder.embed_image_url(text)
+
+
+# Backward-compatible alias for existing imports (e.g. restapi.py)
+NovaMultimodalEmbeddingsAdapter = MultimodalEmbeddingsAdapter

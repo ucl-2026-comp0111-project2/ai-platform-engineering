@@ -221,6 +221,7 @@ class EmbeddingsFactory:
       "gemini/text-embedding-004": 768,
       "vertex_ai/textembedding-gecko": 768,
       "vertex_ai/textembedding-gecko@003": 768,
+      "vertex_ai/gemini-embedding-2": 3072,
       "voyage/voyage-01": 1024,
       "voyage/voyage-lite-01": 1024,
       "voyage/voyage-3": 1024,
@@ -240,3 +241,16 @@ class EmbeddingsFactory:
     # If not set, return default
     # Default to 1536 (most common)
     return 1536
+
+  @staticmethod
+  def get_provider_identifier() -> str:
+    """
+    Get a string identifying the currently configured embedding provider and model,
+    for tagging stored documents so a later provider/model switch can be detected.
+
+    Returns:
+        str: "{provider}:{model}", e.g. "litellm:vertex_ai/gemini-embedding-2"
+    """
+    provider = os.getenv("EMBEDDINGS_PROVIDER", "azure-openai").lower()
+    model = os.getenv("EMBEDDINGS_MODEL", "text-embedding-3-small")
+    return f"{provider}:{model}"
