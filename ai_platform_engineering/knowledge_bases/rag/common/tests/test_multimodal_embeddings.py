@@ -1,7 +1,4 @@
-"""
-Tests for NovaMultimodalEmbedder (multimodal_embeddings.py)
-"""
-import base64
+"""Tests for multimodal_embeddings.py (Nova, Gemini embedders and the provider factory)."""
 import os
 import pytest
 import requests
@@ -9,134 +6,127 @@ from unittest.mock import patch, MagicMock
 
 from common.multimodal_embeddings import (
   NovaMultimodalEmbedder,
+  GeminiMultimodalEmbedder,
+  MultimodalEmbeddingsFactory,
   ImageDownloadError,
   ImageReadError,
   UnsupportedImageFormatError,
+  _detect_format,
+  _download_image,
 )
 
 
-class TestNovaMultimodalEmbedderInit:
-  """Test suite for NovaMultimodalEmbedder initialization"""
+ENV = {"LITELLM_API_BASE": "https://proxy.example.com/v1", "LITELLM_API_KEY": "test-key"}
 
-  def test_reads_config_from_env(self):
-    """Test that api_base and api_key are read from environment variables"""
-    with patch.dict(os.environ, {"LITELLM_API_BASE": "https://proxy.example.com/v1", "LITELLM_API_KEY": "test-key"}):
-      embedder = NovaMultimodalEmbedder()
+
+class TestBaseEmbedderInit:
+  """Init behavior is shared across providers (BaseMultimodalEmbedder), tested against both."""
+
+  @pytest.mark.parametrize("embedder_class", [NovaMultimodalEmbedder, GeminiMultimodalEmbedder])
+  def test_reads_config_from_env(self, embedder_class):
+    with patch.dict(os.environ, ENV):
+      embedder = embedder_class()
       assert embedder.api_base == "https://proxy.example.com/v1"
       assert embedder.api_key == "test-key"
 
-  def test_explicit_args_override_env(self):
-    """Test that explicit constructor args take priority over env vars"""
-    with patch.dict(os.environ, {"LITELLM_API_BASE": "https://proxy.example.com/v1", "LITELLM_API_KEY": "env-key"}):
-      embedder = NovaMultimodalEmbedder(api_base="https://custom.example.com/v1", api_key="custom-key")
+  @pytest.mark.parametrize("embedder_class", [NovaMultimodalEmbedder, GeminiMultimodalEmbedder])
+  def test_explicit_args_override_env(self, embedder_class):
+    with patch.dict(os.environ, ENV):
+      embedder = embedder_class(api_base="https://custom.example.com/v1", api_key="custom-key")
       assert embedder.api_base == "https://custom.example.com/v1"
       assert embedder.api_key == "custom-key"
 
-  def test_missing_api_base_raises_value_error(self):
-    """Test that a missing LITELLM_API_BASE raises ValueError"""
+  @pytest.mark.parametrize("embedder_class", [NovaMultimodalEmbedder, GeminiMultimodalEmbedder])
+  def test_missing_api_base_raises_value_error(self, embedder_class):
     with patch.dict(os.environ, {"LITELLM_API_KEY": "test-key"}, clear=True):
       with pytest.raises(ValueError, match="LITELLM_API_BASE"):
-        NovaMultimodalEmbedder()
+        embedder_class()
 
-  def test_missing_api_key_raises_value_error(self):
-    """Test that a missing LITELLM_API_KEY raises ValueError"""
+  @pytest.mark.parametrize("embedder_class", [NovaMultimodalEmbedder, GeminiMultimodalEmbedder])
+  def test_missing_api_key_raises_value_error(self, embedder_class):
     with patch.dict(os.environ, {"LITELLM_API_BASE": "https://proxy.example.com/v1"}, clear=True):
       with pytest.raises(ValueError, match="LITELLM_API_KEY"):
-        NovaMultimodalEmbedder()
+        embedder_class()
 
 
 class TestDetectFormat:
-  """Test suite for NovaMultimodalEmbedder._detect_format"""
-
-  def _make_embedder(self):
-    return NovaMultimodalEmbedder(api_base="https://proxy.example.com/v1", api_key="test-key")
+  """Module-level format detection, shared by all providers."""
 
   def test_detects_supported_formats(self):
-    """Test that common supported image extensions are correctly detected"""
-    embedder = self._make_embedder()
-    assert embedder._detect_format("https://example.com/photo.jpg") == "jpeg"
-    assert embedder._detect_format("https://example.com/photo.jpeg") == "jpeg"
-    assert embedder._detect_format("https://example.com/logo.png") == "png"
-    assert embedder._detect_format("https://example.com/anim.gif") == "gif"
-    assert embedder._detect_format("https://example.com/pic.webp") == "webp"
+    assert _detect_format("https://example.com/photo.jpg") == "jpeg"
+    assert _detect_format("https://example.com/photo.jpeg") == "jpeg"
+    assert _detect_format("https://example.com/logo.png") == "png"
+    assert _detect_format("https://example.com/anim.gif") == "gif"
+    assert _detect_format("https://example.com/pic.webp") == "webp"
 
   def test_missing_extension_raises_error(self):
-    """Test that a URL with no file extension raises UnsupportedImageFormatError"""
-    embedder = self._make_embedder()
     with pytest.raises(UnsupportedImageFormatError, match="Unsupported or missing image format"):
-      embedder._detect_format("https://example.com/no-extension")
+      _detect_format("https://example.com/no-extension")
 
   def test_unsupported_extension_raises_error(self):
-    """Test that an unsupported file extension raises UnsupportedImageFormatError"""
-    embedder = self._make_embedder()
     with pytest.raises(UnsupportedImageFormatError, match="Unsupported or missing image format"):
-      embedder._detect_format("https://example.com/document.pdf")
+      _detect_format("https://example.com/document.pdf")
 
 
 class TestDownloadImage:
-  """Test suite for NovaMultimodalEmbedder._download_image"""
-
-  def _make_embedder(self):
-    return NovaMultimodalEmbedder(api_base="https://proxy.example.com/v1", api_key="test-key")
+  """Module-level download, shared by all providers."""
 
   def test_successful_download_returns_bytes(self):
-    """Test that a successful download returns the response content bytes"""
-    embedder = self._make_embedder()
     mock_response = MagicMock()
     mock_response.content = b"fake-image-bytes"
     mock_response.raise_for_status = MagicMock()
     with patch("common.multimodal_embeddings.requests.get", return_value=mock_response) as mock_get:
-      result = embedder._download_image("https://example.com/photo.jpg")
+      result = _download_image("https://example.com/photo.jpg")
       assert result == b"fake-image-bytes"
-      mock_get.assert_called_once_with("https://example.com/photo.jpg", timeout=15)
+      mock_get.assert_called_once()
+      assert mock_get.call_args.args == ("https://example.com/photo.jpg",)
+      assert mock_get.call_args.kwargs["timeout"] == 15
 
   def test_network_failure_raises_image_download_error(self):
-    """Test that a network failure during download raises ImageDownloadError"""
-    embedder = self._make_embedder()
     with patch("common.multimodal_embeddings.requests.get", side_effect=requests.ConnectionError("network down")):
       with pytest.raises(ImageDownloadError, match="Failed to download image"):
-        embedder._download_image("https://example.com/photo.jpg")
+        _download_image("https://example.com/photo.jpg")
 
 
-class TestEmbedImageUrl:
-  """Test suite for NovaMultimodalEmbedder.embed_image_url"""
+def _mock_download(content: bytes = b"fake-image-bytes") -> MagicMock:
+  response = MagicMock()
+  response.content = content
+  response.raise_for_status = MagicMock()
+  return response
 
+
+def _mock_proxy_response(embedding=None, body: dict = None) -> MagicMock:
+  response = MagicMock()
+  response.raise_for_status = MagicMock()
+  response.json.return_value = body if body is not None else {"data": [{"embedding": embedding or [0.1, 0.2, 0.3]}]}
+  return response
+
+
+class TestNovaEmbedImageUrl:
   def _make_embedder(self):
     return NovaMultimodalEmbedder(api_base="https://proxy.example.com/v1", api_key="test-key")
 
-  def test_successful_embedding_returns_vector(self):
-    """Test the full successful flow: download, encode, call the proxy, return embedding"""
+  def test_successful_embedding_uses_raw_base64_payload(self):
     embedder = self._make_embedder()
-
-    mock_download_response = MagicMock()
-    mock_download_response.content = b"fake-image-bytes"
-    mock_download_response.raise_for_status = MagicMock()
-
     fake_embedding = [0.1, 0.2, 0.3]
-    mock_proxy_response = MagicMock()
-    mock_proxy_response.raise_for_status = MagicMock()
-    mock_proxy_response.json.return_value = {"data": [{"embedding": fake_embedding}]}
-
-    with patch("common.multimodal_embeddings.requests.get", return_value=mock_download_response):
-      with patch("common.multimodal_embeddings.requests.post", return_value=mock_proxy_response) as mock_post:
+    with patch("common.multimodal_embeddings.requests.get", return_value=_mock_download()):
+      with patch("common.multimodal_embeddings.requests.post", return_value=_mock_proxy_response(fake_embedding)) as mock_post:
         result = embedder.embed_image_url("https://example.com/photo.jpg")
 
     assert result == fake_embedding
-    mock_post.assert_called_once()
     call_kwargs = mock_post.call_args.kwargs
-    assert call_kwargs["json"]["model"] == "bedrock/amazon.nova-2-multimodal-embeddings-v1:0"
+    assert call_kwargs["json"]["model"] == embedder.model_id
     assert call_kwargs["json"]["encoding_format"] == "base64"
+    assert isinstance(call_kwargs["json"]["input"], str)  # raw base64 string, not wrapped
     assert call_kwargs["headers"]["Authorization"] == "Bearer test-key"
 
   def test_download_failure_propagates(self):
-    """Test that a download failure during embed_image_url propagates as ImageDownloadError"""
     embedder = self._make_embedder()
     with patch("common.multimodal_embeddings.requests.get", side_effect=requests.ConnectionError("network down")):
       with pytest.raises(ImageDownloadError):
         embedder.embed_image_url("https://example.com/photo.jpg")
 
-  def test_unsupported_format_propagates(self):
-    """Test that an unsupported image format raises before any download is attempted"""
+  def test_unsupported_format_raises_before_download(self):
     embedder = self._make_embedder()
     with patch("common.multimodal_embeddings.requests.get") as mock_get:
       with pytest.raises(UnsupportedImageFormatError):
@@ -144,80 +134,70 @@ class TestEmbedImageUrl:
       mock_get.assert_not_called()
 
   def test_proxy_error_response_raises_runtime_error(self):
-    """Test that a failed proxy request (e.g. 400/500) raises RuntimeError"""
     embedder = self._make_embedder()
-
-    mock_download_response = MagicMock()
-    mock_download_response.content = b"fake-image-bytes"
-    mock_download_response.raise_for_status = MagicMock()
-
-    with patch("common.multimodal_embeddings.requests.get", return_value=mock_download_response):
+    with patch("common.multimodal_embeddings.requests.get", return_value=_mock_download()):
       with patch("common.multimodal_embeddings.requests.post", side_effect=requests.HTTPError("400 Bad Request")):
-        with pytest.raises(RuntimeError, match="LiteLLM proxy request failed"):
+        with pytest.raises(RuntimeError, match="Embeddings proxy request failed"):
           embedder.embed_image_url("https://example.com/photo.jpg")
 
   def test_malformed_proxy_response_raises_runtime_error(self):
-    """Test that an unexpected proxy response shape raises RuntimeError"""
     embedder = self._make_embedder()
-
-    mock_download_response = MagicMock()
-    mock_download_response.content = b"fake-image-bytes"
-    mock_download_response.raise_for_status = MagicMock()
-
-    mock_proxy_response = MagicMock()
-    mock_proxy_response.raise_for_status = MagicMock()
-    mock_proxy_response.json.return_value = {"unexpected": "shape"}
-
-    with patch("common.multimodal_embeddings.requests.get", return_value=mock_download_response):
-      with patch("common.multimodal_embeddings.requests.post", return_value=mock_proxy_response):
+    with patch("common.multimodal_embeddings.requests.get", return_value=_mock_download()):
+      with patch("common.multimodal_embeddings.requests.post", return_value=_mock_proxy_response(body={"unexpected": "shape"})):
         with pytest.raises(RuntimeError, match="Unexpected response format"):
           embedder.embed_image_url("https://example.com/photo.jpg")
 
-class TestEmbedLocalImage:
-  """Test suite for local image embedding used by live query-side search."""
 
+class TestGeminiEmbedImageUrl:
   def _make_embedder(self):
-    return NovaMultimodalEmbedder(api_base="https://proxy.example.com/v1", api_key="test-key")
+    return GeminiMultimodalEmbedder(api_base="https://proxy.example.com/v1", api_key="test-key")
 
-  def test_embed_image_path_reads_local_file_and_calls_proxy(self, tmp_path):
-    """Test that local image bytes are encoded and sent to the same Nova endpoint."""
-    image_path = tmp_path / "query.png"
-    image_bytes = b"fake-local-image-bytes"
-    image_path.write_bytes(image_bytes)
-
-    fake_embedding = [0.4, 0.5, 0.6]
-    mock_proxy_response = MagicMock()
-    mock_proxy_response.raise_for_status = MagicMock()
-    mock_proxy_response.json.return_value = {"data": [{"embedding": fake_embedding}]}
-
+  def test_successful_embedding_uses_data_uri_payload(self):
     embedder = self._make_embedder()
-    with patch("common.multimodal_embeddings.requests.get") as mock_get:
-      with patch("common.multimodal_embeddings.requests.post", return_value=mock_proxy_response) as mock_post:
-        result = embedder.embed_image_path(image_path)
+    fake_embedding = [0.4, 0.5, 0.6]
+    with patch("common.multimodal_embeddings.requests.get", return_value=_mock_download()):
+      with patch("common.multimodal_embeddings.requests.post", return_value=_mock_proxy_response(fake_embedding)) as mock_post:
+        result = embedder.embed_image_url("https://example.com/photo.jpg")
 
     assert result == fake_embedding
-    mock_get.assert_not_called()
-    mock_post.assert_called_once()
-    payload = mock_post.call_args.kwargs["json"]
-    assert payload["model"] == "bedrock/amazon.nova-2-multimodal-embeddings-v1:0"
-    assert payload["encoding_format"] == "base64"
-    assert payload["input"] == base64.b64encode(image_bytes).decode("utf-8")
+    call_kwargs = mock_post.call_args.kwargs
+    assert call_kwargs["json"]["model"] == embedder.model_id
+    assert "encoding_format" not in call_kwargs["json"]  # Gemini doesn't use this param
+    assert call_kwargs["json"]["input"] == [f"data:image/jpeg;base64,{__import__('base64').b64encode(b'fake-image-bytes').decode()}"]
 
-  def test_embed_image_path_missing_file_raises_image_read_error(self, tmp_path):
-    """Test that missing local image files fail clearly before calling LiteLLM."""
+  def test_png_mime_type_is_correct(self):
     embedder = self._make_embedder()
-    with patch("common.multimodal_embeddings.requests.post") as mock_post:
-      with pytest.raises(ImageReadError, match="Image file does not exist"):
-        embedder.embed_image_path(tmp_path / "missing.png")
-      mock_post.assert_not_called()
+    with patch("common.multimodal_embeddings.requests.get", return_value=_mock_download()):
+      with patch("common.multimodal_embeddings.requests.post", return_value=_mock_proxy_response()) as mock_post:
+        embedder.embed_image_url("https://example.com/logo.png")
 
-  def test_embed_image_path_unsupported_extension_raises_before_read(self, tmp_path):
-    """Test that unsupported local image formats are rejected before reading."""
-    image_path = tmp_path / "diagram.svg"
-    image_path.write_text("<svg />", encoding="utf-8")
+    data_uri = mock_post.call_args.kwargs["json"]["input"][0]
+    assert data_uri.startswith("data:image/png;base64,")
 
+  def test_proxy_error_response_raises_runtime_error(self):
     embedder = self._make_embedder()
-    with patch("common.multimodal_embeddings.requests.post") as mock_post:
-      with pytest.raises(UnsupportedImageFormatError):
-        embedder.embed_image_path(image_path)
-      mock_post.assert_not_called()
+    with patch("common.multimodal_embeddings.requests.get", return_value=_mock_download()):
+      with patch("common.multimodal_embeddings.requests.post", side_effect=requests.HTTPError("400 Bad Request")):
+        with pytest.raises(RuntimeError, match="Embeddings proxy request failed"):
+          embedder.embed_image_url("https://example.com/photo.jpg")
+
+
+class TestMultimodalEmbeddingsFactory:
+  def test_defaults_to_gemini(self):
+    with patch.dict(os.environ, ENV, clear=True):
+      embedder = MultimodalEmbeddingsFactory.get_embedder()
+      assert isinstance(embedder, GeminiMultimodalEmbedder)
+
+  def test_can_select_nova(self):
+    with patch.dict(os.environ, {**ENV, "MULTIMODAL_EMBEDDINGS_PROVIDER": "nova"}):
+      embedder = MultimodalEmbeddingsFactory.get_embedder()
+      assert isinstance(embedder, NovaMultimodalEmbedder)
+
+  def test_dimension_matches_selected_provider(self):
+    with patch.dict(os.environ, {**ENV, "MULTIMODAL_EMBEDDINGS_PROVIDER": "nova"}):
+      assert MultimodalEmbeddingsFactory.get_embedding_dimension() == NovaMultimodalEmbedder.dimension
+
+  def test_invalid_provider_raises_value_error(self):
+    with patch.dict(os.environ, {**ENV, "MULTIMODAL_EMBEDDINGS_PROVIDER": "bogus"}):
+      with pytest.raises(ValueError, match="Unsupported multimodal embeddings provider"):
+        MultimodalEmbeddingsFactory.get_embedder()

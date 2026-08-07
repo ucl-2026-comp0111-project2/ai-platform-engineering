@@ -7,7 +7,7 @@ for embedding and storage.
 
 import time
 from typing import List
-import json
+
 
 from scrapy import Spider
 from scrapy.exceptions import DropItem
@@ -102,10 +102,6 @@ class DocumentPipeline:
         "source": item.url,
         "language": item.language or "",
         "generator": item.generator or "",
-        # Serialized as JSON string: Milvus's dynamic fields do not reliably
-        # support storing a list of nested objects (dicts). Parse this back
-        # with json.loads() when reading the field downstream.
-        "images": json.dumps(item.images) if item.images else "",
         **item.extra_metadata,
       },
     )
