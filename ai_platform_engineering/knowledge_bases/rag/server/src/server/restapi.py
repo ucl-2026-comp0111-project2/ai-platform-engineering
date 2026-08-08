@@ -106,6 +106,33 @@ ontology_agent_client = httpx.AsyncClient(base_url=os.getenv("ONTOLOGY_AGENT_RES
 graph_rag_enabled = os.getenv("ENABLE_GRAPH_RAG", "true").lower() in ("true", "1", "yes")
 image_embedding_enabled = os.getenv("ENABLE_IMAGE_EMBEDDING", "true").lower() in ("true", "1", "yes")
 
+
+def _image_collection_provider_matches(vector_db: Milvus, collection_name: str) -> bool:
+  """Check that existing image vectors use the configured embedding provider."""
+  try:
+    rows = vector_db.client.query(
+      collection_name=collection_name,
+      filter="",
+      output_fields=["embedding_provider"],
+      limit=1,
+    )
+  except Exception as e:
+    logger.warning(f"Could not inspect image collection embedding provider: {e}")
+    return True
+
+  if not rows:
+    return True
+
+  embedding_function = getattr(vector_db, "embedding_function", None)
+  if embedding_function is None:
+    embedding_function = getattr(vector_db, "embeddings", None)
+  embedder = getattr(embedding_function, "embedder", None)
+  if embedder is None:
+    return False
+
+  stored_provider = rows[0].get("embedding_provider")
+  return stored_provider == embedder.__class__.__name__
+
 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 milvus_uri = os.getenv("MILVUS_URI", "http://localhost:19530")
 embeddings_model = os.getenv("EMBEDDINGS_MODEL", "text-embedding-3-small")
@@ -363,7 +390,16 @@ async def app_lifespan(app: FastAPI):
       except Exception as e:
         logger.warning(f"Failed to create image collection (will be created on first real image ingestion): {e}")
     else:
-      logger.info(f"Collection {default_collection_name_images} already exists")
+      if _image_collection_provider_matches(image_vector_db, default_collection_name_images):
+        logger.info(f"Collection {default_collection_name_images} already exists")
+      else:
+        configured_provider = image_embeddings.embedder.__class__.__name__
+        logger.error(
+          f"Collection {default_collection_name_images} contains vectors from a different "
+          f"embedding provider than {configured_provider}; image ingestion is disabled until "
+          "the collection is cleared or rebuilt."
+        )
+        image_vector_db = None
   else:
     image_vector_db = None
     logger.info("Image embedding disabled via ENABLE_IMAGE_EMBEDDING")

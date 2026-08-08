@@ -28,8 +28,10 @@ def _make_image_vstore(existing_ids=None):
     """A mock image_vstore with aclient.query/aadd_embeddings wired for testing."""
     vstore = MagicMock()
     vstore.collection_name = "rag_images"
-    vstore.embedding_function = MagicMock()
-    vstore.embedding_function.embedder = MagicMock()
+    embedding_function = MagicMock()
+    embedding_function.embedder = MagicMock()
+    vstore.embedding_function = embedding_function
+    vstore.embeddings = embedding_function
     vstore.aclient = AsyncMock()
     vstore.aclient.query.return_value = [{"pk": pk} for pk in (existing_ids or [])]
     vstore.aadd_embeddings = AsyncMock()
@@ -184,6 +186,18 @@ class TestIngestImages:
     async def test_image_vstore_none_is_never_called(self):
         processor = _make_processor(image_vstore=None)
         assert processor.image_vstore is None
+
+    async def test_stores_configured_embedding_provider_metadata(self):
+        image_vstore = _make_image_vstore()
+        image_vstore.embeddings.embedder.__class__.__name__ = "NovaMultimodalEmbedder"
+        processor = _make_processor(image_vstore=image_vstore)
+        doc = _make_doc("https://example.com/page", images=[{"url": "https://example.com/pic.jpg", "alt_text": ""}])
+
+        with patch("server.ingestion.time.sleep"):
+            await processor._ingest_images(documents=[doc], job_id="job-1")
+
+        metadatas = image_vstore.aadd_embeddings.await_args.kwargs["metadatas"]
+        assert metadatas[0]["embedding_provider"] == "NovaMultimodalEmbedder"
 
 
 

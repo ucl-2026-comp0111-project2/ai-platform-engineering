@@ -181,6 +181,23 @@ def test_search_text_uses_live_embedding_and_returns_results():
   assert results[0].image_url == "https://example.com/corpus-image.png"
   assert client.search_calls[0]["data"] == [[0.1, 0.2, 0.3]]
   assert client.search_calls[0]["limit"] == 1
+  assert client.search_calls[0]["filter"] == '(embedding_provider == "FakeEmbedder")'
+
+
+def test_search_text_allows_explicit_provider_filter_override():
+  client = FakeMilvusClient()
+
+  search_text(
+    "NASA logo",
+    top_k=1,
+    client=client,
+    embedder=FakeEmbedder(),
+    embedding_provider="NovaMultimodalEmbedder",
+  )
+
+  assert client.search_calls[0]["filter"] == (
+    '(embedding_provider == "NovaMultimodalEmbedder")'
+  )
 
 
 def test_search_text_rejects_dimension_mismatch():

@@ -185,6 +185,11 @@ def _provider_filter(embedding_provider: Optional[str]) -> Optional[str]:
   return f'embedding_provider == "{embedding_provider}"'
 
 
+def _embedder_provider_id(embedder: BaseMultimodalEmbedder) -> str:
+  """Return the provider identifier persisted by image ingestion."""
+  return embedder.__class__.__name__
+
+
 def _combine_filters(*filters: Optional[str]) -> Optional[str]:
   active = [expr for expr in filters if expr]
   if not active:
@@ -270,6 +275,7 @@ def search_image(
     raise RuntimeError(f"Could not determine vector field for collection: {collection_name}")
 
   embedder = embedder or MultimodalEmbeddingsFactory.get_embedder()
+  embedding_provider = embedding_provider or _embedder_provider_id(embedder)
   query_embedding = embedder.embed_image_path(image_path)
   if info.vector_dimension and info.vector_dimension != len(query_embedding):
     raise RuntimeError(
@@ -319,6 +325,7 @@ def search_text(
     raise RuntimeError(f"Could not determine vector field for collection: {collection_name}")
 
   embedder = embedder or MultimodalEmbeddingsFactory.get_embedder()
+  embedding_provider = embedding_provider or _embedder_provider_id(embedder)
   query_embedding = embedder.embed_text(text)
   if info.vector_dimension and info.vector_dimension != len(query_embedding):
     raise RuntimeError(
