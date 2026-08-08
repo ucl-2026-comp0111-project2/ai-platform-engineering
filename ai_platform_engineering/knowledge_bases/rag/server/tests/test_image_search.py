@@ -13,6 +13,7 @@ from server.image_search import (  # noqa: E402
   download_image_results,
   inspect_image_collection,
   search_image,
+  search_text,
 )
 
 
@@ -20,9 +21,14 @@ class FakeEmbedder:
   def __init__(self, vector=None):
     self.vector = vector or [0.1, 0.2, 0.3]
     self.paths = []
+    self.texts = []
 
   def embed_image_path(self, image_path):
     self.paths.append(str(image_path))
+    return self.vector
+
+  def embed_text(self, text):
+    self.texts.append(text)
     return self.vector
 
 
@@ -155,6 +161,80 @@ def test_search_image_rejects_dimension_mismatch(tmp_path):
       image_path,
       client=FakeMilvusClient(dim=1024),
       embedder=FakeEmbedder(vector=[0.1, 0.2, 0.3]),
+    )
+
+
+def test_search_text_uses_live_embedding_and_returns_results():
+  client = FakeMilvusClient()
+  embedder = FakeEmbedder()
+
+  results = search_text(
+    "NASA logo with a blue circle and red vector",
+    top_k=1,
+    client=client,
+    embedder=embedder,
+    candidate_k=1,
+  )
+
+  assert embedder.texts == ["NASA logo with a blue circle and red vector"]
+  assert len(results) == 1
+  assert results[0].image_url == "https://example.com/corpus-image.png"
+  assert client.search_calls[0]["data"] == [[0.1, 0.2, 0.3]]
+  assert client.search_calls[0]["limit"] == 1
+
+
+def test_search_text_rejects_dimension_mismatch():
+  with pytest.raises(RuntimeError, match="dimension"):
+    search_text(
+      "NASA logo",
+      client=FakeMilvusClient(dim=1024),
+      embedder=FakeEmbedder(vector=[0.1, 0.2, 0.3]),
+    )
+
+
+def test_search_text_reranks_vector_candidates_with_metadata():
+  hits = [
+    {
+      "id": "plain_text",
+      "distance": 0.10,
+      "entity": {
+        "text": "https://example.com/inter.png",
+        "source_document": "https://example.com/brand-guidelines",
+        "alt_text": "Typography sample",
+      },
+    },
+    {
+      "id": "nasa_logo",
+      "distance": 0.12,
+      "entity": {
+        "text": "https://nasa.gov/nasa-insignia-logo.png",
+        "source_document": "https://nasa.gov/brand-guidelines",
+        "alt_text": "NASA logo insignia",
+      },
+    },
+  ]
+
+  results = search_text(
+    "NASA logo",
+    top_k=2,
+    candidate_k=2,
+    metadata_weight=0.8,
+    client=FakeMilvusClient(hits=hits),
+    embedder=FakeEmbedder(),
+  )
+
+  assert [result.image_id for result in results] == ["nasa_logo", "plain_text"]
+  assert results[0].metadata_score > results[1].metadata_score
+  assert results[0].rerank_score > results[1].rerank_score
+
+
+def test_search_text_rejects_invalid_metadata_weight():
+  with pytest.raises(ValueError, match="metadata_weight"):
+    search_text(
+      "NASA logo",
+      metadata_weight=1.1,
+      client=FakeMilvusClient(),
+      embedder=FakeEmbedder(),
     )
 
 

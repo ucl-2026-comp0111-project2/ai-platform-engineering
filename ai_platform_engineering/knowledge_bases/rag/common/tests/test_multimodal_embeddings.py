@@ -201,3 +201,35 @@ class TestMultimodalEmbeddingsFactory:
     with patch.dict(os.environ, {**ENV, "MULTIMODAL_EMBEDDINGS_PROVIDER": "bogus"}):
       with pytest.raises(ValueError, match="Unsupported multimodal embeddings provider"):
         MultimodalEmbeddingsFactory.get_embedder()
+
+
+class TestEmbedText:
+  """Test suite for Nova text embeddings used by text-to-image search."""
+
+  def _make_embedder(self):
+    return NovaMultimodalEmbedder(api_base="https://proxy.example.com/v1", api_key="test-key")
+
+  def test_embed_text_calls_proxy_and_returns_vector(self):
+    fake_embedding = [0.7, 0.8, 0.9]
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"data": [{"embedding": fake_embedding}]}
+    embedder = self._make_embedder()
+
+    with patch("common.multimodal_embeddings.requests.post", return_value=mock_response) as mock_post:
+      result = embedder.embed_text("NASA logo")
+
+    assert result == fake_embedding
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload == {
+      "model": embedder.model_id,
+      "input": "NASA logo",
+      "embeddingPurpose": "IMAGE_RETRIEVAL",
+    }
+
+  def test_embed_text_rejects_empty_query(self):
+    embedder = self._make_embedder()
+    with patch("common.multimodal_embeddings.requests.post") as mock_post:
+      with pytest.raises(ValueError, match="must not be empty"):
+        embedder.embed_text("   ")
+      mock_post.assert_not_called()

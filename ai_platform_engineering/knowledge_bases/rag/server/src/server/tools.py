@@ -18,6 +18,7 @@ from server.rbac import derive_team_for_request, get_accessible_datasource_ids, 
 from fastmcp import FastMCP
 from common.utils import json_encode
 from server.snippet_utils import format_search_result
+from server.image_search import search_text
 
 # Load environment variables from .env file
 dotenv.load_dotenv(verbose=True)
@@ -101,6 +102,9 @@ class AgentTools:
       description = self._build_search_description(self._DEFAULT_SEARCH_CONFIG, graph_rag_enabled)
       mcp.tool(name_or_fn=fn, description=description)
 
+    if os.getenv("ENABLE_IMAGE_EMBEDDING", "true").lower() in ("true", "1", "yes"):
+      mcp.tool(self.search_images)
+
     # Register each enabled custom search tool (skip reserved/built-in names)
     for config in tool_configs:
       if not config.enabled or config.tool_id in self._SKIP_TOOL_IDS:
@@ -129,6 +133,31 @@ class AgentTools:
           mcp.tool(tool)
 
     logger.info(f"Registered MCP tools: {[t.name for t in await mcp.list_tools()]}")
+
+  async def search_images(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    """Search pre-embedded Knowledge Base images from a text description.
+
+    Use this tool when the user asks to find, show, or retrieve images. It
+    returns ranked image URLs and source metadata that the CAIPE UI can render.
+    """
+    bounded_limit = max(1, min(limit, 5))
+    results = await asyncio.to_thread(search_text, text=query, top_k=bounded_limit)
+    return {
+      "type": "knowledge_base_image_results",
+      "query": query,
+      "results": [
+        {
+          "rank": result.rank,
+          "score": result.score,
+          "image_id": result.image_id,
+          "image_url": result.image_url,
+          "source_document": result.source_document,
+          "alt_text": result.alt_text,
+          "rerank_score": result.rerank_score,
+        }
+        for result in results
+      ],
+    }
 
   async def reload_tools(
     self,

@@ -1,4 +1,6 @@
-"""Multimodal image embedding providers (Nova, Gemini) via a configurable embeddings API."""
+"""
+Multimodal image embedding providers (Nova, Gemini) for ingestion and retrieval.
+"""
 import base64
 import os
 from pathlib import Path
@@ -35,6 +37,10 @@ _PROVIDER_REGISTRY = {
 class ImageDownloadError(Exception):
   """Image could not be downloaded."""
   pass
+
+
+class ImageReadError(Exception):
+  """A local query image could not be read."""
 
 
 class UnsupportedImageFormatError(Exception):
@@ -80,10 +86,10 @@ class BaseMultimodalEmbedder:
   def _build_payload(self, encoded_image: str, image_format: str) -> dict:
     raise NotImplementedError
 
-  def embed_image_url(self, url: str) -> List[float]:
-    """Download an image and return its embedding vector."""
-    image_format = _detect_format(url)
-    image_bytes = _download_image(url)
+  def _build_text_payload(self, text: str) -> dict:
+    return {"model": self.model_id, "input": [text]}
+
+  def _embed_image_bytes(self, image_bytes: bytes, image_format: str, source: str) -> List[float]:
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
     payload = self._build_payload(encoded_image, image_format)
 
@@ -96,12 +102,54 @@ class BaseMultimodalEmbedder:
       )
       response.raise_for_status()
       embedding = response.json()["data"][0]["embedding"]
-      logger.info(f"Embedded image via {self.provider_name}: url={url}, dimension={len(embedding)}")
+      logger.info(f"Embedded image via {self.provider_name}: source={source}, dimension={len(embedding)}")
       return embedding
     except requests.RequestException as e:
-      raise RuntimeError(f"Embeddings proxy request failed for image {url}: {e}") from e
+      raise RuntimeError(f"Embeddings proxy request failed for image {source}: {e}") from e
     except (KeyError, IndexError) as e:
-      raise RuntimeError(f"Unexpected response format from {self.provider_name} for {url}: {e}") from e
+      raise RuntimeError(f"Unexpected response format from {self.provider_name} for {source}: {e}") from e
+
+  def embed_image_url(self, url: str) -> List[float]:
+    """Download an image and return its embedding vector."""
+    image_format = _detect_format(url)
+    image_bytes = _download_image(url)
+    return self._embed_image_bytes(image_bytes, image_format, url)
+
+  def embed_image_path(self, path: Union[str, Path]) -> List[float]:
+    """Read a local query image and return its embedding vector."""
+    image_path = Path(path)
+    image_format = _detect_format(image_path.name)
+    try:
+      image_bytes = image_path.read_bytes()
+    except OSError as e:
+      raise ImageReadError(f"Failed to read image from {image_path}: {e}") from e
+    return self._embed_image_bytes(image_bytes, image_format, str(image_path))
+
+  def embed_text(self, text: str) -> List[float]:
+    """Generate a provider-compatible text-to-image retrieval embedding."""
+    if not text.strip():
+      raise ValueError("Text query must not be empty")
+    try:
+      response = requests.post(
+        f"{self.api_base}/embeddings",
+        headers={
+          "Authorization": f"Bearer {self.api_key}",
+          "Content-Type": "application/json",
+        },
+        json=self._build_text_payload(text),
+        timeout=60,
+      )
+      response.raise_for_status()
+      embedding = response.json()["data"][0]["embedding"]
+      logger.info(
+        "Generated multimodal text embedding with dimension %s",
+        len(embedding),
+      )
+      return embedding
+    except requests.RequestException as e:
+      raise RuntimeError(f"LiteLLM proxy text embedding request failed: {e}") from e
+    except (KeyError, IndexError) as e:
+      raise RuntimeError(f"Unexpected response format from LiteLLM proxy: {e}") from e
 
 
 class NovaMultimodalEmbedder(BaseMultimodalEmbedder):
@@ -112,6 +160,9 @@ class NovaMultimodalEmbedder(BaseMultimodalEmbedder):
 
   def _build_payload(self, encoded_image: str, image_format: str) -> dict:
     return {"model": self.model_id, "input": encoded_image, "encoding_format": "base64"}
+
+  def _build_text_payload(self, text: str) -> dict:
+    return {"model": self.model_id, "input": text, "embeddingPurpose": "IMAGE_RETRIEVAL"}
 
 
 class GeminiMultimodalEmbedder(BaseMultimodalEmbedder):

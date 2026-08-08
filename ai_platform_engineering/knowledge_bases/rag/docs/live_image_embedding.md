@@ -32,7 +32,8 @@ local query image
   -> optionally download matched image URLs for local inspection
 ```
 
-This is intended for validating image-to-image retrieval against Linda's pre-embedded webpage image corpus.
+The helper supports both image-to-image and Nova text-to-image retrieval against
+Linda's pre-embedded webpage image corpus.
 
 ## Architecture
 
@@ -60,7 +61,7 @@ D. Multimodal/native image embeddings
 E. Storage and retrieval
    corpus image vectors
       -> Milvus collection rag_images
-      -> live image query searches rag_images
+      -> live image or text query searches rag_images
 ```
 
 ## Configuration
@@ -103,6 +104,21 @@ Search with a local image:
 python scripts/search_image.py --image "<path-to-query-image.png>" --top-k 5 --embedding-provider nova
 ```
 
+Search for images with a Nova text query:
+
+```bash
+python scripts/search_image.py --text "NASA logo with a blue circle and red vector" --top-k 10
+```
+
+Nova text queries use `embeddingPurpose=IMAGE_RETRIEVAL`, while corpus images
+remain index embeddings. This query/index distinction is required for meaningful
+cross-modal ranking.
+
+Text search retrieves a larger vector candidate set and reranks it using the
+image URL/filename, `alt_text`, and source metadata. Use `--candidate-k` and
+`--metadata-weight` to tune this hybrid reranking. The default metadata weight
+is `0.55`.
+
 Print JSON output:
 
 ```bash
@@ -126,6 +142,7 @@ python scripts/search_image.py --image "<path-to-query-image.png>" --top-k 5 --e
 | Input/source | Current status |
 | --- | --- |
 | Local PNG/JPG/JPEG/GIF/WebP query image | Supported by `embed_image_path` and `scripts/search_image.py`. |
+| Text query against Nova image vectors | Supported by `embed_text` and `scripts/search_image.py --text`. |
 | Webpage image URLs in crawled pages | Supported by Linda's webloader ingestion path. |
 | Images inside PDFs or office documents | Not implemented in this flow. |
 | SVG files | Not supported by the Nova image embedding model and rejected by format validation. |
