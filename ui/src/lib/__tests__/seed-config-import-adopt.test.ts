@@ -45,6 +45,9 @@ jest.mock("@/lib/rbac/workflow-config-rebac", () => ({
   normalizeSharedWithTeamSlugs: jest.fn(async (slugs: string[]) => slugs),
   repairWorkflowConfigTeamSlugRefs: jest.fn(async () => 0),
 }));
+jest.mock("@/lib/rbac/unlinked-service-account", () => ({
+  resolveUnlinkedServiceAccountSub: jest.fn(async () => null),
+}));
 
 import { adoptConfigImportedAgents, cleanupStaleConfigDriven } from "../seed-config";
 
@@ -63,7 +66,7 @@ describe("cleanupStaleConfigDriven — config_import_adopted guard", () => {
   });
 
   it("excludes adopted agents from the stale-cleanup query", async () => {
-    await cleanupStaleConfigDriven(new Set(), new Set(), new Set(), new Set());
+    await cleanupStaleConfigDriven(new Set(), new Set(), new Set(), new Set(), new Set());
 
     expect(mockCollection.find).toHaveBeenCalledWith({
       config_driven: true,
@@ -76,7 +79,7 @@ describe("cleanupStaleConfigDriven — config_import_adopted guard", () => {
       toArray: jest.fn(async () => [{ _id: "stale-agent" }]),
     });
 
-    await cleanupStaleConfigDriven(new Set(), new Set(), new Set(), new Set());
+    await cleanupStaleConfigDriven(new Set(), new Set(), new Set(), new Set(), new Set());
 
     expect(mockCollection.deleteOne).toHaveBeenCalledWith({ _id: "stale-agent" });
   });

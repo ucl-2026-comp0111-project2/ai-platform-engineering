@@ -617,6 +617,9 @@ services:
       - PAGERDUTY_CLIENT_SECRET=${PAGERDUTY_CLIENT_SECRET:-}
       - PAGERDUTY_REDIRECT_URI=${PAGERDUTY_REDIRECT_URI:-}
       - PAGERDUTY_SCOPES=${PAGERDUTY_SCOPES:-}
+      - AMPLITUDE_CLIENT_ID=${AMPLITUDE_CLIENT_ID:-}
+      - AMPLITUDE_CLIENT_SECRET=${AMPLITUDE_CLIENT_SECRET:-}
+      - CREDENTIAL_BOOTSTRAP_OAUTH_CONNECTORS_JSON=${CREDENTIAL_BOOTSTRAP_OAUTH_CONNECTORS_JSON:-}
       # 098 Enterprise RBAC — Keycloak AuthZ (requires --profile rbac)
       - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:7080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-caipe}
@@ -645,7 +648,6 @@ services:
       - SLACK_BOT_ADMIN_TOKEN_URL=${SLACK_BOT_ADMIN_TOKEN_URL:-http://keycloak:7080/realms/caipe/protocol/openid-connect/token}
       - SLACK_BOT_ADMIN_DEV_AUTH_ENABLED=${SLACK_BOT_ADMIN_DEV_AUTH_ENABLED:-false}
       - SLACK_BOT_ADMIN_DEV_TOKEN=${SLACK_BOT_ADMIN_DEV_TOKEN:-}
-      - WEBEX_INTEGRATION_BOT_ACCESS_TOKEN=${WEBEX_INTEGRATION_BOT_ACCESS_TOKEN:-}
       - WEBEX_WORKSPACE_ALIAS=${WEBEX_WORKSPACE_ALIAS:-CAIPE-WEBEX}
       - WEBEX_LINK_HMAC_SECRET=${WEBEX_LINK_HMAC_SECRET:-${WEBEX_SIGNING_SECRET:-}}
       - WEBEX_BOT_ADMIN_URL=${WEBEX_BOT_ADMIN_URL:-http://webex-bot:3002}
@@ -829,6 +831,9 @@ services:
       - PAGERDUTY_CLIENT_SECRET=${PAGERDUTY_CLIENT_SECRET:-}
       - PAGERDUTY_REDIRECT_URI=${PAGERDUTY_REDIRECT_URI:-}
       - PAGERDUTY_SCOPES=${PAGERDUTY_SCOPES:-}
+      - AMPLITUDE_CLIENT_ID=${AMPLITUDE_CLIENT_ID:-}
+      - AMPLITUDE_CLIENT_SECRET=${AMPLITUDE_CLIENT_SECRET:-}
+      - CREDENTIAL_BOOTSTRAP_OAUTH_CONNECTORS_JSON=${CREDENTIAL_BOOTSTRAP_OAUTH_CONNECTORS_JSON:-}
       - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:7080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-caipe}
       - KEYCLOAK_RESOURCE_SERVER_ID=${KEYCLOAK_RESOURCE_SERVER_ID:-caipe-platform}
@@ -845,7 +850,6 @@ services:
       - SLACK_BOT_ADMIN_TOKEN_URL=${SLACK_BOT_ADMIN_TOKEN_URL:-http://keycloak:7080/realms/caipe/protocol/openid-connect/token}
       - SLACK_BOT_ADMIN_DEV_AUTH_ENABLED=${SLACK_BOT_ADMIN_DEV_AUTH_ENABLED:-false}
       - SLACK_BOT_ADMIN_DEV_TOKEN=${SLACK_BOT_ADMIN_DEV_TOKEN:-}
-      - WEBEX_INTEGRATION_BOT_ACCESS_TOKEN=${WEBEX_INTEGRATION_BOT_ACCESS_TOKEN:-}
       - WEBEX_WORKSPACE_ALIAS=${WEBEX_WORKSPACE_ALIAS:-CAIPE-WEBEX}
       - WEBEX_LINK_HMAC_SECRET=${WEBEX_LINK_HMAC_SECRET:-${WEBEX_SIGNING_SECRET:-}}
       - WEBEX_BOT_ADMIN_URL=${WEBEX_BOT_ADMIN_URL:-http://webex-bot:3002}
@@ -956,6 +960,10 @@ services:
       - ${HOME}/.aws:/home/app/.aws:ro
       # Spec 102 — PDP-unavailable fallback (no-op in dev).
       - ${RBAC_FALLBACK_FILE:-/dev/null}:/etc/keycloak/realm-config-extras.json:ro
+      # Local attachment store (ATTACHMENT_BACKEND=local default). Attachment
+      # bytes are content-addressed here; only a reference is persisted to the
+      # Mongo checkpoint. Mirrors audit_service_data:/var/lib/caipe-audit-service.
+      - dynamic_agents_attachments:/var/lib/caipe-attachments
     env_file: [.env]
     environment:
       # Dev-only: DEV_HOT_RELOAD toggles the existing DEBUG-driven uvicorn reload
@@ -977,6 +985,12 @@ services:
       - OIDC_DISCOVERY_URL=${OIDC_DISCOVERY_URL:-}
       - OIDC_GROUP_CLAIM=${OIDC_GROUP_CLAIM:-}
       - OIDC_REQUIRED_ADMIN_GROUP=${OIDC_REQUIRED_ADMIN_GROUP:-}
+      # Force-clear OIDC_AUDIENCE so it does NOT leak in from the shared .env via
+      # env_file. A single value here collapses jwks_validate's default accept
+      # list ("caipe-platform,agentgateway") to just that one, which rejects the
+      # Slack-bot OBO token (aud=caipe-platform) as bearer_invalid / 401. An
+      # explicit blank restores the default multi-audience accept list.
+      - OIDC_AUDIENCE=
       # Centralized Authorization Service — DA delegates agent-use decisions to the
       # BFF's /api/authz/v1/decisions (forwards the caller's bearer / OBO). DA fails
       # closed if unset or unreachable. Point at whichever UI service is running.
@@ -1049,6 +1063,9 @@ services:
       - OPENFGA_STORE_ID=${OPENFGA_STORE_ID:-}
       - AUTHZ_TRACING_ENABLED=${AUTHZ_TRACING_ENABLED:-false}
       - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+      # Dedicated /metrics port. 0 (default) serves metrics on the main API
+      # port — current behavior, unchanged.
+      - METRICS_PORT=${DYNAMIC_AGENTS_METRICS_PORT:-0}
 
     healthcheck:
       # Use /healthz (matches FastAPI route in routes/health.py and the Helm chart probes).
@@ -1867,6 +1884,7 @@ services:
       - DEV_HOT_RELOAD=${DEV_HOT_RELOAD:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - WEBEX_INTEGRATION_BOT_ACCESS_TOKEN=${WEBEX_INTEGRATION_BOT_ACCESS_TOKEN:-}
+      - WEBEX_INTEGRATION_BOTS_JSON=${WEBEX_INTEGRATION_BOTS_JSON:-}
       - WEBEX_WORKSPACE_ALIAS=${WEBEX_WORKSPACE_ALIAS:-CAIPE-WEBEX}
       - WEBEX_WORKSPACE_ID=${WEBEX_WORKSPACE_ID:-}
       - CAIPE_API_URL=${CAIPE_API_URL:-http://caipe-ui:3000}
@@ -1877,9 +1895,6 @@ services:
       - WEBEX_THREAD_CONTEXT_ENABLED=${WEBEX_THREAD_CONTEXT_ENABLED:-true}
       - WEBEX_THREAD_CONTEXT_MAX_MESSAGES=${WEBEX_THREAD_CONTEXT_MAX_MESSAGES:-10}
       - WEBEX_THREAD_CONTEXT_MAX_CHARS=${WEBEX_THREAD_CONTEXT_MAX_CHARS:-4000}
-      - WEBEX_AUTO_ASSIGN_UNMAPPED_SPACES=${WEBEX_AUTO_ASSIGN_UNMAPPED_SPACES:-false}
-      - WEBEX_DEFAULT_TEAM_SLUG=${WEBEX_DEFAULT_TEAM_SLUG:-}
-      - WEBEX_DEFAULT_AGENT_ID=${WEBEX_DEFAULT_AGENT_ID:-}
       - WEBEX_ADMIN_API_ENABLED=${WEBEX_ADMIN_API_ENABLED:-false}
       - WEBEX_ADMIN_API_HOST=${WEBEX_ADMIN_API_HOST:-0.0.0.0}
       - WEBEX_ADMIN_API_PORT=${WEBEX_ADMIN_API_PORT:-3002}
@@ -2430,6 +2445,9 @@ volumes:
   agentgateway_config:
     driver: local
   audit_service_data:
+    driver: local
+  # Local attachment blob store for dynamic-agents (ATTACHMENT_BACKEND=local).
+  dynamic_agents_attachments:
     driver: local
   # Durable Keycloak state (users, role assignments, per-team client scopes,
   # `team_member:<slug>` realm roles, identity links, token-exchange grants).

@@ -35,6 +35,7 @@ from utils import slack_context
 from utils import slack_formatter
 from utils.hitl_handler import HITLCallbackHandler
 from utils.chat_envelope import augment_slack_client_context  # noqa: E402
+from utils.file_ingest import download_slack_files, IngestResult  # noqa: E402
 
 from sse_client import AgentAccessDeniedError, SSEClient, set_obo_token
 from utils.session_manager import SessionManager
@@ -59,12 +60,68 @@ from utils.slack_admin_api import start_slack_admin_api_server  # noqa: E402
 app = App(token=os.environ.get("SLACK_INTEGRATION_BOT_TOKEN", os.environ.get("SLACK_BOT_TOKEN", "")))
 APP_NAME = os.environ.get("SLACK_INTEGRATION_APP_NAME", os.environ.get("APP_NAME", "CAIPE"))
 _WORKSPACE_URL = os.environ.get("SLACK_WORKSPACE_URL", "").rstrip("/")
+_ROUTABLE_AMBIENT_MESSAGE_SUBTYPES = frozenset(
+  {None, "", "bot_message", "file_share"}
+)
 
 
 def _msg_link(channel_id: str, ts: str) -> str:
   if not _WORKSPACE_URL or not ts:
     return ""
   return f" {_WORKSPACE_URL}/archives/{channel_id}/p{ts.replace('.', '')}"
+
+
+def _apply_attachment_notices(message_text: str, ingest: IngestResult) -> str:
+  """Append any 'file attached but inaccessible' notices to the agent message.
+
+  Files that couldn't be downloaded (e.g. missing files:read scope) produce
+  notices; we fold them into the message so the agent can tell the user a file
+  was attached but unreadable instead of silently ignoring it. No notices ⇒
+  message unchanged.
+  """
+  if not ingest.notices:
+    return message_text
+  note = "\n\n".join(ingest.notices)
+  return f"{message_text}\n\n[Attachment note: {note}]" if message_text else f"[Attachment note: {note}]"
+
+
+def _ingestion_lag_ms(event: dict) -> int | None:
+  """Milliseconds between Slack's event timestamp and now.
+
+  ``event["ts"]`` is the wall-clock time Slack assigned when the message was
+  sent, so this measures true end-to-end lag (Slack delivery + our own
+  queueing/processing), not just time spent inside this process. Used to
+  profile where multi-minute response delays accumulate — Slack delivery,
+  our RBAC/routing pipeline, or agent dispatch — without hand-correlating
+  raw event timestamps against logs after the fact.
+  """
+  send_ts = event.get("ts")
+  try:
+    send_ts = float(send_ts)
+  except (TypeError, ValueError):
+    return None
+  return int((time.time() - send_ts) * 1000)
+
+
+def _log_stage(event: dict, stage: str, **extra) -> None:
+  """Emit a single structured timing line for pipeline-stage profiling."""
+  fields = " ".join(f"{k}={v}" for k, v in extra.items())
+  logger.debug(
+    "[{}] stage={} ingestion_lag_ms={} {}",
+    event.get("ts"), stage, _ingestion_lag_ms(event), fields,
+  )
+
+
+def _channel_id_from_view_metadata(body: dict) -> str | None:
+  """Recover channel_id for view_submission payloads (modal submits).
+
+  Unlike block_actions/event bodies, a view_submission body carries no
+  top-level channel field at all — the channel only lives in
+  view.private_metadata, which our feedback modal encodes as
+  "channel_id|thread_ts|message_ts|agent_id|feedback_type".
+  """
+  private_metadata = body.get("view", {}).get("private_metadata", "")
+  return private_metadata.split("|")[0] or None if private_metadata else None
 
 # 098 Enterprise RBAC enforcement
 RBAC_ENABLED = os.environ.get("SLACK_RBAC_ENABLED", "false").lower() == "true"
@@ -115,6 +172,7 @@ if RBAC_ENABLED:
             body.get("event", {}).get("channel")
             or body.get("channel", {}).get("id")
             or body.get("channel_id")  # slash command bodies
+            or _channel_id_from_view_metadata(body)  # view_submission (modal submit)
         )
         if channel_id:
             context["slack_channel_id"] = channel_id
@@ -919,6 +977,79 @@ def _track_interaction(
     logger.warning(f"[{thread_ts}] Failed to update interaction metadata")
 
 
+def _record_message_turns(
+  conversation_id: str,
+  thread_ts: str,
+  channel_id: str,
+  trigger_ts: str,
+  agent_id: str,
+  response_time_ms: int | None = None,
+  channel_name: str | None = None,
+) -> None:
+  """Persist per-turn message rows (metadata-only) for a Slack exchange.
+
+  Slack turn content lives in Slack / the LangGraph checkpointer, so we do NOT
+  duplicate it here. We write two content-less ``messages`` rows — one ``user``
+  turn and one ``assistant`` turn — carrying just the metadata admin stats need
+  to count Slack messages the same way as web (source, agent, latency) and to
+  deep-link back to the source thread.
+
+  Called ONLY after a genuine, successful Forge response (never on skipped or
+  retry/error turns). ``message_id`` is derived from the triggering message ts
+  so the upsert is idempotent across Slack event retries.
+
+  ``agent_id`` is sent as-is; the server resolves it to the canonical display
+  name so Slack and web message rows share the same ``agent_name`` label. The
+  row's ``owner_id`` (the user-attribution key for stats) is inherited from the
+  conversation server-side — which the bot set to the Slack user's email — so
+  the same person's Slack and web activity aggregate to one bucket.
+  """
+  # Deep-link back to the Slack thread (same shape as _track_interaction).
+  slack_permalink = None
+  workspace = _WORKSPACE_URL
+  if workspace and thread_ts:
+    slack_permalink = f"{workspace}/archives/{channel_id}/p{thread_ts.replace('.', '')}"
+
+  link_meta: dict[str, object] = {
+    "source": "slack",
+    "agent_id": agent_id,
+    "channel_id": channel_id,
+    "thread_ts": thread_ts,
+  }
+  if channel_name:
+    link_meta["channel_name"] = channel_name
+  if slack_permalink:
+    link_meta["slack_permalink"] = slack_permalink
+
+  # Stable per-turn base id from the triggering message ts (dedupe key).
+  base_id = f"slack-{conversation_id}-{trigger_ts}"
+
+  try:
+    sse_client.add_message(
+      conversation_id=conversation_id,
+      message_id=f"{base_id}-user",
+      role="user",
+      metadata={
+        **link_meta,
+        "turn_id": f"{trigger_ts}-user",
+      },
+    )
+    sse_client.add_message(
+      conversation_id=conversation_id,
+      message_id=f"{base_id}-assistant",
+      role="assistant",
+      metadata={
+        **link_meta,
+        "turn_id": f"{trigger_ts}-assistant",
+        "is_final": True,
+        **({"latency_ms": response_time_ms} if response_time_ms is not None else {}),
+      },
+    )
+  except Exception:
+    # Best-effort telemetry: never let a stats write break the Slack response.
+    logger.warning(f"[{thread_ts}] Failed to record Slack message turns")
+
+
 def _call_ai(
   client,
   channel_id,
@@ -933,6 +1064,7 @@ def _call_ai(
   overthink_config=None,
   escalation_config=None,
   client_context=None,
+  files=None,
 ):
   """Route to stream_response or invoke_response based on user type."""
   logger.info(f"[{thread_ts}] _call_ai: conv={conversation_id} agent={agent_id} user={user_id} overthink={overthink_config}")
@@ -954,6 +1086,7 @@ def _call_ai(
       overthink_config=overthink_config,
       escalation_config=escalation_config,
       client_context=client_context,
+      files=files,
     )
   else:
     return ai.invoke_response(
@@ -968,6 +1101,7 @@ def _call_ai(
       additional_footer=additional_footer,
       escalation_config=escalation_config,
       client_context=client_context,
+      files=files,
     )
 
 
@@ -1022,6 +1156,7 @@ def rbac_global_middleware(body, context, next, logger):
     5. Stores the OBO access token and user_sub on the Bolt context
        for per-handler RBAC checks.
     """
+    _log_stage(body.get("event", {}), "middleware_entry")
     if not RBAC_ENABLED:
         next()
         return
@@ -1113,6 +1248,7 @@ def rbac_global_middleware(body, context, next, logger):
     is_command = bool(body.get("command"))
 
     loop = None
+    _rbac_t0 = time.monotonic()
     try:
         loop = asyncio.new_event_loop()
         rbac_status = loop.run_until_complete(
@@ -1122,6 +1258,10 @@ def rbac_global_middleware(body, context, next, logger):
                 context,
                 require_mapping=not (is_mention or is_command),
             )
+        )
+        logger.debug(
+            "[{}] stage=rbac_enrich_context_done duration_ms={} status={}",
+            event.get("ts"), int((time.monotonic() - _rbac_t0) * 1000), rbac_status,
         )
     except Exception as exc:
         logger.error("Failed to resolve Slack user %s — denying request: %s", slack_user_id, exc)
@@ -1134,6 +1274,7 @@ def rbac_global_middleware(body, context, next, logger):
         body.get("event", {}).get("channel")
         or body.get("channel", {}).get("id")
         or body.get("channel_id")  # slash command bodies
+        or _channel_id_from_view_metadata(body)  # view_submission (modal submit)
     )
 
     if rbac_status == "unlinked":
@@ -1221,6 +1362,7 @@ def rbac_global_middleware(body, context, next, logger):
 @app.event("app_mention")
 def handle_mention(event, say, client, context=None):
   """Handle @mentions of the bot to query CAIPE."""
+  _log_stage(event, "handle_mention_entry")
   try:
     # Wall-clock start for `_track_interaction(response_time_ms=...)` below.
     t0 = time.monotonic()
@@ -1353,6 +1495,16 @@ def handle_mention(event, say, client, context=None):
           "thread_ts": thread_ts,
           "channel_id": channel_id,
           "channel_name": channel_config.name,
+          # Flag threads owned by a Slack bot/app (e.g. GitLab, alert bots).
+          # Their Slack user IDs are "U…"-prefixed like humans, so stats can't
+          # tell them apart by ID — this lets the leaderboard exclude them when
+          # "Show bot users" is off.
+          **({"owner_is_bot": True} if is_bot else {}),
+          # Bot/app owners aren't rows in our users collection, so stats can't
+          # resolve their "U…" owner_id to a name. Persist the app's display
+          # name here so the leaderboard shows "GitLab" instead of the raw id
+          # when "Show bot users" is on.
+          **({"owner_display_name": bot_username} if is_bot and bot_username else {}),
           **({"workspace_url": SLACK_WORKSPACE_URL} if SLACK_WORKSPACE_URL else {}),
         },
       )
@@ -1431,6 +1583,14 @@ def handle_mention(event, say, client, context=None):
 
     esc_config = get_escalation_config(agent_match) if agent_match else None
 
+    # Download any Slack attachments into base64 multimodal blocks so the model
+    # can read them (client.token authenticates the private file URLs). Files
+    # that couldn't be accessed (e.g. missing files:read scope) surface as
+    # notices folded into the message so the agent can tell the user.
+    ingest = download_slack_files(event.get("files"), bot_token=client.token)
+    input_files = ingest.files
+    context_message = _apply_attachment_notices(context_message, ingest)
+
     result = _call_ai(
       client=client,
       channel_id=channel_id,
@@ -1442,6 +1602,7 @@ def handle_mention(event, say, client, context=None):
       conversation_id=conversation_id,
       escalation_config=esc_config,
       client_context=client_context,
+      files=input_files,
     )
 
     if isinstance(result, dict) and result.get("skipped"):
@@ -1488,6 +1649,7 @@ def handle_mention(event, say, client, context=None):
     # updates `last_processed_ts` (delta-context fast path on follow-ups,
     # spec from commit 706a1994), so this single call replaces what was
     # previously an inline `update_conversation_metadata` POST.
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
     _track_interaction(
       conversation_id=conversation_id,
       thread_ts=thread_ts,
@@ -1496,10 +1658,23 @@ def handle_mention(event, say, client, context=None):
       user_id=user_id,
       user_email=user_email,
       user_name=user_name,
-      response_time_ms=int((time.monotonic() - t0) * 1000),
+      response_time_ms=elapsed_ms,
       last_processed_ts=event.get("ts"),
       thread_owner_agent_id=agent_id,
     )
+
+    # Persist per-turn message rows for stats/linking — only on a genuine
+    # successful response (skip retry/error turns, which fall through above).
+    if not (isinstance(result, dict) and result.get("retry_needed")):
+      _record_message_turns(
+        conversation_id=conversation_id,
+        thread_ts=thread_ts,
+        channel_id=channel_id,
+        trigger_ts=event.get("ts") or thread_ts,
+        agent_id=agent_id,
+        response_time_ms=elapsed_ms,
+        channel_name=channel_config.name if channel_config else None,
+      )
 
   except Exception as e:
     logger.exception(f"Error handling CAIPE mention: {e}")
@@ -1525,6 +1700,7 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
   authorization check and by `_bind_obo_for_handler()` so OBO tokens flow into
   MCP calls. Both default to no-ops when RBAC is disabled.
   """
+  _log_stage(event, "route_to_agent_entry", agent_id=agent_match.agent_id if agent_match else None)
   try:
     t0 = time.monotonic()
 
@@ -1567,7 +1743,13 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
     channel_id = event.get("channel")
     thread_ts = event.get("ts")
 
-    if event.get("subtype") and event.get("subtype") != "bot_message":
+    subtype = event.get("subtype")
+    if subtype not in _ROUTABLE_AMBIENT_MESSAGE_SUBTYPES:
+      logger.debug(
+        "[{}] Ignoring ambient Slack message subtype={}",
+        thread_ts,
+        subtype,
+      )
       return
 
     if not utils.verify_thread_exists(client, channel_id, thread_ts):
@@ -1581,13 +1763,27 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
       user_id = event.get("user")
     team_id = event.get("team")
     message_text = slack_context.extract_message_text(event)
+    raw_files = event.get("files") or []
+
+    if raw_files:
+      logger.info(
+        "[{}] Processing Slack message attachments files={} has_text={} subtype={}",
+        thread_ts,
+        len(raw_files),
+        bool(message_text.strip()),
+        subtype or "none",
+      )
 
     user_name, user_email = utils.get_message_author_info(event, client)
     sender_label = "bot" if is_bot else "user"
 
     logger.info(f"[{thread_ts}] Routing {sender_label} message to agent={agent_match.agent_id} - User: {user_name} ({user_id}), Channel: {channel_id}{_msg_link(channel_id, thread_ts)}")
 
-    if not message_text or not message_text.strip():
+    if not message_text.strip() and not raw_files:
+      logger.debug(
+        "[{}] Ignoring ambient Slack message with no text or files",
+        thread_ts,
+      )
       return
 
     agent_id = agent_match.agent_id
@@ -1601,6 +1797,20 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
       )
       return
 
+    # Download attachments only after the route is authorized. If Slack file
+    # access is unavailable (for example, no files:read scope), the ingest
+    # notice is appended to the original text and CAIPE still handles the turn.
+    ingest = download_slack_files(raw_files, bot_token=client.token)
+    input_files = ingest.files
+    message_text = _apply_attachment_notices(message_text, ingest)
+
+    if not message_text.strip() and not input_files:
+      logger.info(
+        "[{}] Ignoring Slack file message with no usable text or attachments",
+        thread_ts,
+      )
+      return
+
     conv_result = sse_client.create_conversation(
       title=message_text[:50].strip() or "Slack Thread",
       agent_id=agent_id,
@@ -1610,6 +1820,11 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
         "thread_ts": thread_ts,
         "channel_id": channel_id,
         "channel_name": channel_config.name,
+        # Flag bot/app-owned threads so stats can exclude them (see handle_mention).
+        **({"owner_is_bot": True} if is_bot else {}),
+        # Persist the bot/app display name so stats can label the "U…" owner_id
+        # (see handle_mention).
+        **({"owner_display_name": bot_username} if is_bot and bot_username else {}),
         **({"workspace_url": SLACK_WORKSPACE_URL} if SLACK_WORKSPACE_URL else {}),
       },
     )
@@ -1682,6 +1897,7 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
       overthink_config=overthink,
       escalation_config=esc_config,
       client_context=client_context,
+      files=input_files,
     )
 
     if isinstance(result, dict) and result.get("skipped"):
@@ -1693,6 +1909,7 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
     session_manager.set_thread_owner(thread_root_ts or thread_ts, agent_id)
     logger.info(f"[{thread_ts}] Completed {sender_label} request for {user_name}")
 
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
     _track_interaction(
       conversation_id=conversation_id,
       thread_ts=thread_ts,
@@ -1701,8 +1918,20 @@ def _route_to_agent(event, say, client, channel_config, agent_match, is_bot, bot
       user_id=user_id,
       user_email=user_email,
       user_name=user_name,
-      response_time_ms=int((time.monotonic() - t0) * 1000),
+      response_time_ms=elapsed_ms,
       thread_owner_agent_id=agent_id,
+    )
+
+    # Persist per-turn message rows for stats/linking (successful turn only —
+    # skipped turns return above; this handler has no retry fallthrough).
+    _record_message_turns(
+      conversation_id=conversation_id,
+      thread_ts=thread_ts,
+      channel_id=channel_id,
+      trigger_ts=event.get("ts") or thread_ts,
+      agent_id=agent_id,
+      response_time_ms=elapsed_ms,
+      channel_name=channel_config.name if channel_config else None,
     )
 
   except AgentAccessDeniedError as e:
@@ -1927,6 +2156,14 @@ def handle_dm_message(event, say, client, context=None):
       surface_kind="dm",
     )
 
+    # Download any Slack attachments into base64 multimodal blocks so the model
+    # can read them (client.token authenticates the private file URLs). Files
+    # that couldn't be accessed (e.g. missing files:read scope) surface as
+    # notices folded into the message so the agent can tell the user.
+    ingest = download_slack_files(event.get("files"), bot_token=client.token)
+    input_files = ingest.files
+    context_message = _apply_attachment_notices(context_message, ingest)
+
     result = _call_ai(
       client=client,
       channel_id=dm_channel_id,
@@ -1937,6 +2174,7 @@ def handle_dm_message(event, say, client, context=None):
       agent_id=agent_id,
       conversation_id=conversation_id,
       client_context=client_context,
+      files=input_files,
     )
 
     if isinstance(result, dict) and result.get("retry_needed"):
@@ -1975,6 +2213,7 @@ def handle_dm_message(event, say, client, context=None):
     # Telemetry: record interaction metadata. _track_interaction also
     # updates `last_processed_ts` (delta-context fast path on follow-ups),
     # so this single call replaces the older inline metadata POST.
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
     _track_interaction(
       conversation_id=conversation_id,
       thread_ts=thread_ts,
@@ -1983,9 +2222,22 @@ def handle_dm_message(event, say, client, context=None):
       user_id=user_id,
       user_email=user_email,
       user_name=user_name,
-      response_time_ms=int((time.monotonic() - t0) * 1000),
+      response_time_ms=elapsed_ms,
       last_processed_ts=event.get("ts"),
     )
+
+    # Persist per-turn message rows for stats/linking — only on a genuine
+    # successful response (skip retry/error turns, which fall through above).
+    # DMs have no channel config, so no channel_name.
+    if not (isinstance(result, dict) and result.get("retry_needed")):
+      _record_message_turns(
+        conversation_id=conversation_id,
+        thread_ts=thread_ts,
+        channel_id=channel_id,
+        trigger_ts=event.get("ts") or thread_ts,
+        agent_id=agent_id,
+        response_time_ms=elapsed_ms,
+      )
 
   except Exception as e:
     logger.exception(f"Error handling DM message: {e}")
@@ -2004,6 +2256,7 @@ def handle_message_events(body, say, client, context=None):
   event = body.get("event")
   if not event:
     return
+  _log_stage(event, "handle_message_events_entry")
 
   subtype = event.get("subtype")
   if subtype in ("message_deleted", "message_changed", "channel_join", "channel_leave"):
@@ -2047,6 +2300,7 @@ def handle_message_events(body, say, client, context=None):
         logger.warning(f"event.get('username') also returned nothing for bot_id={bot_id}; bot_list filtering may not work correctly")
 
   sender_user_id = event.get("user") if not is_bot else None
+  _match_t0 = time.monotonic()
   matches = _match_channel_agents(
     channel_id,
     channel_config,
@@ -2056,6 +2310,10 @@ def handle_message_events(body, say, client, context=None):
     user_id=sender_user_id,
     listen="message",
     workspace_id=_event_workspace_id(event),
+  )
+  logger.debug(
+    "[{}] stage=match_channel_agents_done duration_ms={} matched={}",
+    event.get("ts"), int((time.monotonic() - _match_t0) * 1000), bool(matches),
   )
   if not matches:
     mode = slack_agent_route_mode()
@@ -2133,8 +2391,9 @@ def handle_hitl_action(ack, body, client):
 # Feedback Action Handler
 # =============================================================================
 @app.action("caipe_feedback")
-def handle_caipe_feedback(ack, body, client):
+def handle_caipe_feedback(ack, body, client, context=None):
   ack()
+  _bind_obo_for_handler(context)
   try:
     user_id = body.get("user", {}).get("id")
     channel_id = body.get("channel", {}).get("id")
@@ -2215,8 +2474,9 @@ def handle_feedback_less_verbose(ack, body, client):
 
 
 @app.action("caipe_retry")
-def handle_caipe_retry(ack, body, client):
+def handle_caipe_retry(ack, body, client, context=None):
   ack()
+  _bind_obo_for_handler(context)
   try:
     user_id = body.get("user", {}).get("id")
     action = body.get("actions", [{}])[0]
@@ -2289,8 +2549,9 @@ def handle_caipe_retry(ack, body, client):
 # Escalation Action Handlers
 # =============================================================================
 @app.action("caipe_escalation_get_help")
-def handle_escalation_get_help(ack, body, client):
+def handle_escalation_get_help(ack, body, client, context=None):
   ack()
+  _bind_obo_for_handler(context)
   try:
     from utils.escalation import execute_escalation
 
@@ -2338,7 +2599,7 @@ def handle_escalation_get_help(ack, body, client):
     session_manager.set_escalated(thread_ts)
 
     # Track escalation in feedback
-    conversation_id = _resolve_conversation_id(thread_ts, channel_id)
+    conversation_id = _resolve_conversation_id(thread_ts, channel_id, agent_id)
     submit_feedback_score(
       thread_ts=thread_ts,
       user_id=user_id,
@@ -2383,14 +2644,19 @@ def handle_escalation_get_help(ack, body, client):
 
 
 @app.action("caipe_delete_message")
-def handle_delete_message(ack, body, client):
+def handle_delete_message(ack, body, client, context=None):
   ack()
+  _bind_obo_for_handler(context)
   try:
     user_id = body.get("user", {}).get("id")
     channel_id = body.get("channel", {}).get("id")
     message = body.get("message", {})
     message_ts = message.get("ts")
     thread_ts = message.get("thread_ts") or message_ts
+
+    action = body.get("actions", [{}])[0]
+    parts = action.get("value", "").split("|")
+    agent_id = parts[3] if len(parts) > 3 else ""
 
     if not channel_id or not message_ts:
       return
@@ -2413,7 +2679,7 @@ def handle_delete_message(ack, body, client):
       logger.warning(f"[{thread_ts}] Unauthorized delete attempt by <@{user_id}>")
       return
 
-    conversation_id = _resolve_conversation_id(thread_ts, channel_id)
+    conversation_id = _resolve_conversation_id(thread_ts, channel_id, agent_id)
     submit_feedback_score(
       thread_ts=thread_ts,
       user_id=user_id,
@@ -2555,8 +2821,9 @@ def _regen_message_text(feedback_type: str, comment: str) -> str:
 
 
 @app.view("caipe_feedback_modal")
-def handle_feedback_modal_submission(ack, body, client, view):
+def handle_feedback_modal_submission(ack, body, client, view, context=None):
   ack()
+  _bind_obo_for_handler(context)
   try:
     user_id = body.get("user", {}).get("id")
     team_id = body.get("team", {}).get("id")

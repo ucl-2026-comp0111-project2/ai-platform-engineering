@@ -10,22 +10,23 @@ import {
 } from "@/lib/rbac/openfga";
 import { logOpenFgaRebacAuditEvent } from "@/lib/rbac/audit";
 import { getBySub, updateScopesSnapshot } from "@/lib/service-accounts";
+import { findAgentVisibilities } from "@/lib/dynamic-agent-visibility";
 import {
   parseScope,
+  refFromObject,
   scopeCheckTuple,
   scopeWriteTuple,
   type ScopeRef,
 } from "@/lib/service-account-scopes";
 import type { ServiceAccountScope } from "@/types/mongodb";
-// [unlinked-sa][TS-B1] Import shared helpers for the org-admin bypass.
-import { isPlatformAdmin } from "@/lib/rbac/unlinked-service-account";
+import { hasOrganizationAdmin as isPlatformAdmin } from "@/lib/rbac/platform-admin";
 
 /**
  * Scope management for a service account (US3).
  *
  * `[id]` is the SA's OpenFGA subject id (`sa_sub`). Both verbs require the
- * caller to be able to MANAGE the SA (owning-team membership):
- *   check(user:<caller>, can_manage, service_account:<id>).
+ * caller to be able to MANAGE the SA (owning-team membership) OR be an org
+ * admin: check(user:<caller>, can_manage, service_account:<id>).
  *
  * POST  — add a scope (FR-015): non-admin editors must ALSO hold the scope
  *         being granted (check(user:<editor>, <rel>, <object>) → 403 if
@@ -99,32 +100,27 @@ async function authorizeScopeMutation(
     };
   }
 
-  // can_manage gate (owning-team membership). 404 to non-members (don't reveal).
+  // can_manage gate (owning-team membership) OR org admin. 404 to neither
+  // (don't reveal existence — FR-022). Org admins get the same bypass here
+  // that every other shareable resource type grants (see resource-authz.ts's
+  // `bypassForOrgAdmin`); this also subsumes the narrower unlinked-SA-only
+  // bypass this route used to have (platform admins could already manage the
+  // unlinked SA's scopes — now that extends to every SA, consistent with the
+  // detail/rotate/credentials routes).
   const canManage = await checkOpenFgaTuple({
     user: `user:${session.sub}`,
     relation: "can_manage",
     object: `service_account:${id}`,
   });
-  const targetDoc = await getBySub(id);
-  const isUnlinkedSa = targetDoc?.is_platform_unlinked === true;
   const platformAdmin = await isPlatformAdmin(session);
-  const unlinkedPlatformAdmin = isUnlinkedSa && platformAdmin;
 
-  if (!canManage.allowed) {
-    // [unlinked-sa][TS-B1] Org-admin bypass for the unlinked SA.
-    // The unlinked SA is owned by super-admins, but its scopes are intended to be
-    // managed by any platform/org-admin (mirrors the unlinked GET route's auth gate).
-    // ADDITIVE: normal SAs still require owning-team can_manage; the bypass ONLY
-    // fires for is_platform_unlinked===true docs when the caller is a platform admin.
-    if (!unlinkedPlatformAdmin) {
-      return {
-        response: NextResponse.json(
-          { success: false, error: "Service account not found" },
-          { status: 404 },
-        ),
-      };
-    }
-    // Org-admin managing the unlinked SA — allow.
+  if (!canManage.allowed && !platformAdmin) {
+    return {
+      response: NextResponse.json(
+        { success: false, error: "Service account not found" },
+        { status: 404 },
+      ),
+    };
   }
 
   return {
@@ -149,29 +145,33 @@ async function refreshSnapshot(
     listOpenFgaObjects({ user: subject, relation: "can_call", type: "tool" }),
   ]);
 
+  const agentIds = agentObjects.objects.map(refFromObject);
+  const toolIds = toolObjects.objects.map(refFromObject);
+
+  // Global (Everyone-shared) agents grant the unlinked SA `can_use` via the
+  // agent's visibility, not via an explicit panel scope. Keep those out of the
+  // display snapshot so the snapshot only ever tracks explicit grants — the
+  // panel surfaces global agents separately as read-only "via Everyone" chips.
+  const visibilityById = await findAgentVisibilities(agentIds);
+  const explicitAgentIds = agentIds.filter((ref) => visibilityById.get(ref) !== "global");
+
   // Preserve prior added_by/added_at where we have them; default new entries to
   // the current editor/time.
   const prior = (await getBySub(saSub))?.scopes_snapshot ?? [];
   const priorByKey = new Map(prior.map((s) => [`${s.type}:${s.ref}`, s]));
 
-  const build = (type: "agent" | "tool", objects: string[]): ServiceAccountScope[] =>
-    objects.map((object) => {
-      const ref = object.slice(object.indexOf(":") + 1);
-      const existing = priorByKey.get(`${type}:${ref}`);
-      return (
-        existing ?? {
+  const build = (type: "agent" | "tool", refs: string[]): ServiceAccountScope[] =>
+    refs.map(
+      (ref) =>
+        priorByKey.get(`${type}:${ref}`) ?? {
           type,
           ref,
           added_by: addedByForNew.sub,
           added_at: addedByForNew.at,
-        }
-      );
-    });
+        },
+    );
 
-  const snapshot = [
-    ...build("agent", agentObjects.objects),
-    ...build("tool", toolObjects.objects),
-  ];
+  const snapshot = [...build("agent", explicitAgentIds), ...build("tool", toolIds)];
   await updateScopesSnapshot(saSub, snapshot);
 }
 
@@ -228,6 +228,24 @@ export async function DELETE(request: Request, context: RouteContext) {
   const pre = await authorizeScopeMutation(request, id);
   if ("response" in pre) return pre.response;
   const { actor, scope } = pre;
+
+  // An agent shared with Everyone (global) grants the unlinked SA `can_use`
+  // through the agent's visibility, not through this explicit scope. Removing
+  // it here would delete a tuple the visibility reconcile re-adds on the next
+  // edit/seed — a silent no-op. Refuse it and point the admin at the agent.
+  if (scope.type === "agent") {
+    const visibilityById = await findAgentVisibilities([scope.ref]);
+    if (visibilityById.get(scope.ref) === "global") {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "This agent is shared with Everyone; unlinked access is managed by the agent's visibility. Change the agent's visibility to revoke it.",
+        },
+        { status: 409 },
+      );
+    }
+  }
 
   // FR-016: removal requires can_manage ONLY (already checked) — the editor
   // need NOT hold the scope. No scope-holding check here, by design.

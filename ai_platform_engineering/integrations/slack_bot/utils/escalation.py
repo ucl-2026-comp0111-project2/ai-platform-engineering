@@ -10,7 +10,6 @@ Supports three configurable actions (all fire if enabled):
 """
 
 import re
-import uuid
 
 from loguru import logger
 
@@ -95,11 +94,23 @@ def _ping_victorops_oncall(
     logger.info(f"[{thread_ts}] VictorOps: querying on-call for team {team} (agent={agent_id})")
     accumulated_text: list[str] = []
 
-    # Use a fresh conversation so the on-call lookup does not inherit the
-    # channel thread history, which can be very large and cause incorrect results.
+    # Register a fresh conversation (no idempotency_key) so the on-call lookup
+    # does not inherit the channel thread history, which can be very large and
+    # cause incorrect results. Retain the originating thread only as metadata
+    # so authorized Insights viewers can navigate back to Slack.
+    conv_result = sse_client.create_conversation(
+      title="VictorOps on-call lookup",
+      agent_id=agent_id,
+      metadata={
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+      },
+    )
+    conversation_id = conv_result["conversation_id"]
+
     for event in sse_client.stream_chat(
       message=prompt,
-      conversation_id=str(uuid.uuid4()),
+      conversation_id=conversation_id,
       agent_id=agent_id,
     ):
       if event.type == SSEEventType.TEXT_MESSAGE_CONTENT and event.delta:

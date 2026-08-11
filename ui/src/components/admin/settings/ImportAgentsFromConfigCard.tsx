@@ -17,6 +17,7 @@
 import { AlertTriangle, FileUp, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { AdminBadge } from "@/components/admin/shared/AdminBadge";
 import { TeamOwnershipFields } from "@/components/rbac/TeamOwnershipFields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -49,9 +50,13 @@ interface TeamOption {
 
 interface ImportAgentsFromConfigCardProps {
   isAdmin: boolean;
+  readOnly?: boolean;
 }
 
-export function ImportAgentsFromConfigCard({ isAdmin }: ImportAgentsFromConfigCardProps) {
+export function ImportAgentsFromConfigCard({
+  isAdmin,
+  readOnly = false,
+}: ImportAgentsFromConfigCardProps) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -115,6 +120,7 @@ export function ImportAgentsFromConfigCard({ isAdmin }: ImportAgentsFromConfigCa
   }
 
   async function handleApply() {
+    if (readOnly) return;
     setApplying(true);
     setError(null);
     try {
@@ -152,7 +158,10 @@ export function ImportAgentsFromConfigCard({ isAdmin }: ImportAgentsFromConfigCa
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Import Agents from Config</CardTitle>
+        <CardTitle className="flex items-center gap-2">
+          Import Agents from Config
+          <AdminBadge />
+        </CardTitle>
         <CardDescription>
           Adopt YAML-seeded dynamic agents into the database. Once adopted, an agent&apos;s
           config-file entry is ignored on every future restart — the database becomes the
@@ -164,7 +173,10 @@ export function ImportAgentsFromConfigCard({ isAdmin }: ImportAgentsFromConfigCa
           type="button"
           variant="outline"
           className="gap-2"
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            if (!readOnly) setOpen(true);
+          }}
+          disabled={readOnly}
           data-testid="import-agents-from-config-button"
         >
           <FileUp className="h-4 w-4" />

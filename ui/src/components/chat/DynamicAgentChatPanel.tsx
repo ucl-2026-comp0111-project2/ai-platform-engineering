@@ -8,37 +8,52 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/components/ui/toast";
 import { Tooltip,TooltipContent,TooltipProvider,TooltipTrigger } from "@/components/ui/tooltip";
 import { useAgentTimeline } from "@/hooks/useDynamicAgentTimeline";
-import { APIClientError } from "@/lib/api-client";
+import { apiClient,APIClientError } from "@/lib/api-client";
 import { authErrorToastTitle,type AuthError } from "@/lib/auth-error";
 import { getConfig } from "@/lib/config";
 import { fetchEphemeralFileContent } from "@/lib/ephemeral-files";
+import { ACCEPT_ATTRIBUTE,fileToInputFile,type InputFile,validateFiles } from "@/lib/file-attachments";
 import { createSubagentResumeSeedEvents } from "@/lib/resume-subagent-context";
 import { createStreamAdapter,StreamError,type StreamCallbacks } from "@/lib/streaming";
 import { createStreamEvent,FILE_TOOL_NAMES,TODO_TOOL_NAME,type StreamEvent } from "@/lib/streaming/types";
 import { cn,deduplicateByKey } from "@/lib/utils";
 import { useChatStore } from "@/store/chat-store";
 import { useFeatureFlagStore } from "@/store/feature-flag-store";
-import { ChatMessage as ChatMessageType,Conversation,TurnStatus } from "@/types/a2a";
+import { buildParticipants,ChatMessage as ChatMessageType,Conversation,type MessageAttachment,TurnStatus } from "@/types/a2a";
 import type { DynamicAgentConfig } from "@/types/dynamic-agent";
 import { AnimatePresence,motion } from "framer-motion";
-import { Activity,ArrowDown,ArrowLeft,Check,ChevronUp,Copy,Loader2,RotateCcw,Send,ShieldCheck,Sparkles,Square,User } from "lucide-react";
+import { Activity,ArrowDown,ArrowLeft,Check,ChevronUp,Copy,Loader2,Paperclip,RotateCcw,Send,ShieldCheck,Sparkles,Square,User } from "lucide-react";
+import { resolveUsableChatAgentId } from "@/lib/chat-agent-selection";
+import { AgentPicker } from "@/components/ui/agent-picker";
 import { signIn,useSession } from "next-auth/react";
+import { useRouter } from "next/navigation";
+import Image from "next/image";
 import React,{ useCallback,useEffect,useMemo,useRef,useState } from "react";
 import TextareaAutosize from "react-textarea-autosize";
 import { DEFAULT_AGENTS } from "./CustomCallButtons";
 import { AgentTimeline,type SubagentLookupInfo } from "./DynamicAgentTimeline";
 import { Feedback,FeedbackButton } from "./FeedbackButton";
 import { MetadataInputForm,type InputField,type UserInputMetadata } from "./MetadataInputForm";
+import { AttachmentChips,type PendingAttachment } from "./AttachmentChips";
+import { MessageAttachments } from "./MessageAttachments";
 import { getFilteredCommands,SlashCommandMenu,type SlashCommand } from "./SlashCommandMenu";
 import { ToolApprovalCard } from "./ToolApprovalCard";
 import { useSlashCommands } from "./useSlashCommands";
 
 type ReadOnlyReason = 'admin_audit' | 'shared_readonly' | 'agent_deleted' | 'agent_disabled';
 
+/**
+ * A message waiting in the composer queue while a turn streams. Carries any
+ * multimodal attachments alongside the text so a queued turn sends its files
+ * too, not just the words.
+ */
+interface QueuedMessage {
+  text: string;
+  files: InputFile[];
+}
+
 interface ChatPanelProps {
-  endpoint: string;
   conversationId?: string; // MongoDB conversation UUID
-  conversationTitle?: string;
   readOnly?: boolean;
   readOnlyReason?: ReadOnlyReason;
   agentId: string; // Mandatory for Dynamic Agents
@@ -46,7 +61,7 @@ interface ChatPanelProps {
   isLoadingMessages?: boolean; // Whether messages are still loading (show skeleton)
 }
 
-export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnly, readOnlyReason, agentId, agent, isLoadingMessages }: ChatPanelProps) {
+export function ChatPanel({ conversationId, readOnly, readOnlyReason, agentId, agent, isLoadingMessages }: ChatPanelProps) {
   // Derive display values from agent object
   const agentGradient = agent?.ui?.gradient_theme ?? null;
   const agentCustomTheme = agent?.ui?.custom_theme_config ?? null;
@@ -54,6 +69,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
   const agentSkills = agent?.skills;
   const { data: session } = useSession();
   const { toast } = useToast();
+  const router = useRouter();
   const autoScrollEnabled = useFeatureFlagStore((s) => s.flags.autoScroll ?? true);
   const showTimestamps = useFeatureFlagStore((s) => s.flags.showTimestamps ?? false);
 
@@ -100,7 +116,11 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
 
   const [input, setInput] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  // Files staged in the composer for the next turn (multimodal input).
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0);
@@ -166,10 +186,67 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     cancelConversationRequest,
     updateMessageFeedback,
     consumePendingMessage,
-    evictOldMessageContent,
     loadMessagesFromServer,
     updateConversationTitle,
   } = useChatStore();
+
+  // Re-link this deprecated/deleted-agent conversation to the platform default agent,
+  // then reload the page so ChatContainer picks up the new participants.
+  const handleStartNewConversation = useCallback(async () => {
+    if (!conversationId) return;
+    try {
+      const agentId = await resolveUsableChatAgentId();
+      const newParticipants = buildParticipants(agentId);
+      await apiClient.updateConversation(conversationId, {
+        participants: newParticipants,
+      });
+      // Patch the Zustand store in-place so ChatContainer sees the new participants
+      // immediately — it skips the API fetch when the conversation is already cached.
+      useChatStore.setState((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId ? { ...c, participants: newParticipants } : c,
+        ),
+      }));
+      router.refresh();
+    } catch (err) {
+      toast(`Could not resume conversation: ${(err as Error).message}`, "error", 8000);
+    }
+  }, [conversationId, router, toast]);
+
+  // "Choose agent" picker state — loaded lazily when the deprecated-agent banner is shown.
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+  const [availableAgents, setAvailableAgents] = useState<{ value: string; label: string }[]>([]);
+  const [chosenAgentId, setChosenAgentId] = useState("");
+
+  useEffect(() => {
+    const isDeprecatedBanner = readOnlyReason === 'agent_deleted' || readOnlyReason === 'agent_disabled';
+    if (!isDeprecatedBanner || availableAgents.length > 0) return;
+    fetch("/api/dynamic-agents/available", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((data) => {
+        const list: DynamicAgentConfig[] = Array.isArray(data?.data) ? data.data : [];
+        setAvailableAgents(
+          list.filter((a) => a.enabled).map((a) => ({ value: a._id, label: a.name })),
+        );
+      })
+      .catch(() => {/* non-critical — picker just stays empty */});
+  }, [readOnlyReason, availableAgents.length]);
+
+  const handleResumeWithChosenAgent = useCallback(async () => {
+    if (!conversationId || !chosenAgentId) return;
+    try {
+      const newParticipants = buildParticipants(chosenAgentId);
+      await apiClient.updateConversation(conversationId, { participants: newParticipants });
+      useChatStore.setState((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId ? { ...c, participants: newParticipants } : c,
+        ),
+      }));
+      router.refresh();
+    } catch (err) {
+      toast(`Could not resume conversation: ${(err as Error).message}`, "error", 8000);
+    }
+  }, [conversationId, chosenAgentId, router, toast]);
 
   // Slash command registry
   const slashCommands = useSlashCommands(agentSkills);
@@ -295,11 +372,13 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
 
   // Auto-scroll during streaming only if user is near the bottom
   // Depend on both message content AND streamEvents length since timeline renders from SSE events
+  const latestMessageContent = conversation?.messages?.at(-1)?.content;
+  const streamEventCount = conversation?.streamEvents?.length;
   useEffect(() => {
     if (autoScrollEnabled && isThisConversationStreaming && !isUserScrolledUp) {
       scrollToBottom("instant");
     }
-  }, [conversation?.messages?.at(-1)?.content, conversation?.streamEvents?.length, isThisConversationStreaming, isUserScrolledUp, scrollToBottom, autoScrollEnabled]);
+  }, [latestMessageContent, streamEventCount, isThisConversationStreaming, isUserScrolledUp, scrollToBottom, autoScrollEnabled]);
 
   // ResizeObserver-based auto-scroll: catches DOM changes from morphdom patches
   // that happen asynchronously after React renders (marked parses async, then
@@ -917,8 +996,9 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
   }, [updateMessage, setConversationStreaming, agentName]);
 
   // Core submit function that accepts a message directly
-  const submitMessage = useCallback(async (messageToSend: string) => {
-    if (!messageToSend.trim() || isThisConversationStreaming) return;
+  const submitMessage = useCallback(async (messageToSend: string, filesToSend: InputFile[] = []) => {
+    // A turn is valid if it has text OR at least one attachment.
+    if ((!messageToSend.trim() && filesToSend.length === 0) || isThisConversationStreaming) return;
 
     // Create conversation if needed. This hits POST /api/chat/conversations
     // which is gated by the Web UI backend auth middleware, so we have to handle the
@@ -959,14 +1039,24 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     };
     clearStreamEvents(convId);
 
-    // Add user message - generate turnId for this request/response pair
+    // Add user message - generate turnId for this request/response pair.
+    // Retain the attachments on the rendered turn so the upload shows in the
+    // transcript (base64 size ≈ 3/4 of the string length, close enough for the
+    // size label). Persistence caps large images in saveMessagesToServer.
     const turnId = `turn-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const attachments: MessageAttachment[] = filesToSend.map((f) => ({
+      mime_type: f.mime_type,
+      name: f.name,
+      data: f.data,
+      size: Math.floor((f.data.length * 3) / 4),
+    }));
     addMessage(convId, {
       role: "user",
       content: messageToSend,
       senderEmail: session?.user?.email ?? undefined,
       senderName: session?.user?.name ?? undefined,
       senderImage: session?.user?.image ?? undefined,
+      ...(attachments.length > 0 && { attachments }),
     }, turnId);
 
     // Add assistant message placeholder with same turnId
@@ -991,7 +1081,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     setConversationStreaming(convId, {
       conversationId: convId,
       messageId: assistantMsgId,
-      client: { abort: () => adapter.abort() } as any,
+      client: { abort: () => adapter.abort() },
       streamAdapter: adapter,
     });
 
@@ -999,7 +1089,13 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
       const callbacks = buildStreamCallbacks(convId, assistantMsgId, loopState, toolCallIdToName);
 
       await adapter.streamMessage(
-        { message: messageToSend, conversationId: convId, agentId, clientContext },
+        {
+          message: messageToSend,
+          conversationId: convId,
+          agentId,
+          clientContext,
+          ...(filesToSend.length > 0 && { files: filesToSend }),
+        },
         callbacks,
       );
 
@@ -1033,7 +1129,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
       });
       setConversationStreaming(convId, null);
     }
-  }, [isThisConversationStreaming, activeConversationId, accessToken, agentId, agentProtocol, createConversation, clearStreamEvents, addMessage, appendToMessage, updateMessage, setConversationStreaming, buildStreamCallbacks, finalizeStreamLoop, session?.user, showAuthErrorToast, toast]);
+  }, [isThisConversationStreaming, activeConversationId, accessToken, agentId, agentProtocol, getActiveConversation, createConversation, clearStreamEvents, addMessage, appendToMessage, updateMessage, setConversationStreaming, buildStreamCallbacks, finalizeStreamLoop, session?.user, showAuthErrorToast, toast]);
 
   // Handle queued messages after streaming completes
   useEffect(() => {
@@ -1043,7 +1139,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
       setQueuedMessages(remaining);
       // Small delay to ensure previous message is fully processed
       setTimeout(() => {
-        submitMessage(firstMessage);
+        submitMessage(firstMessage.text, firstMessage.files);
       }, 300);
     }
   }, [isThisConversationStreaming, queuedMessages, submitMessage]);
@@ -1133,13 +1229,19 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
       "*Type `/` to see the autocomplete menu. Use Arrow keys + Tab to select.*",
     ].join("\n");
 
-    addMessage(convId, { role: "assistant", content: helpText, isFinal: true } as any, turnId);
-  }, [activeConversationId, createConversation, addMessage, updateConversationTitle]);
+    addMessage(convId, { role: "assistant", content: helpText, isFinal: true }, turnId);
+  }, [activeConversationId, agentId, createConversation, addMessage, updateConversationTitle]);
 
   // Handle /clear command
   const handleClearCommand = useCallback(async () => {
     await createConversation(agentId);
   }, [createConversation, agentId]);
+
+  const handleStop = useCallback(() => {
+    if (activeConversationId) {
+      cancelConversationRequest(activeConversationId);
+    }
+  }, [activeConversationId, cancelConversationRequest]);
 
   // Unified slash command executor
   const executeSlashCommand = useCallback(async (commandId: string) => {
@@ -1156,9 +1258,76 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     }
   }, [handleSkillsCommand, handleHelpCommand, handleClearCommand]);
 
+  // Stage files onto the composer, validating type + size caps first and
+  // toasting anything rejected so the user knows why it didn't attach.
+  const addFiles = useCallback((incoming: File[]) => {
+    if (incoming.length === 0) return;
+    setAttachments((prev) => {
+      const { accepted, rejected } = validateFiles(
+        prev.map((a) => a.file),
+        incoming,
+      );
+      if (rejected.length > 0) {
+        const detail = rejected.map((r) => `${r.name}: ${r.reason}`).join("\n");
+        toast(
+          `${rejected.length} file${rejected.length > 1 ? "s" : ""} not attached\n${detail}`,
+          "error",
+          6000,
+        );
+      }
+      if (accepted.length === 0) return prev;
+      const staged = accepted.map((file) => ({
+        id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        file,
+      }));
+      return [...prev, ...staged];
+    });
+  }, [toast]);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) addFiles(Array.from(e.target.files));
+    // Reset so selecting the same file again re-triggers change.
+    e.target.value = "";
+  }, [addFiles]);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData.files);
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  }, [addFiles]);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingFiles(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) addFiles(files);
+  }, [addFiles]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer.types).includes("Files")) {
+      e.preventDefault();
+      setIsDraggingFiles(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    // Only clear when leaving the composer entirely, not when moving between
+    // its children (relatedTarget stays inside the container in that case).
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setIsDraggingFiles(false);
+    }
+  }, []);
+
   // Wrapper for form submission that uses input state
   const handleSubmit = useCallback(async (forceSend = false) => {
-    if (!input.trim()) return;
+    // Allow a turn with text OR attachments (a file-only send is valid).
+    if (!input.trim() && attachments.length === 0) return;
 
     // Check for slash commands via the registry
     const trimmed = input.trim();
@@ -1174,14 +1343,21 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
       }
     }
 
+    // Encode staged attachments once, up front, so both the queue and the
+    // direct-send path carry the same InputFile[] shape the backend expects.
+    const encodedFiles: InputFile[] = attachments.length
+      ? await Promise.all(attachments.map((a) => fileToInputFile(a.file)))
+      : [];
+
     // If streaming and not force sending, queue the message (up to 3)
     if (isThisConversationStreaming && !forceSend) {
       const message = input.trim();
 
       // Add to queue if under limit
       if (queuedMessages.length < 3) {
-        setQueuedMessages(prev => [...prev, message]);
+        setQueuedMessages(prev => [...prev, { text: message, files: encodedFiles }]);
         setInput("");
+        setAttachments([]);
       } else {
         // Queue is full
         console.log("Queue is full (3/3). Send or cancel messages to queue more.");
@@ -1207,9 +1383,10 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     }
 
     setInput("");
+    setAttachments([]);
 
-    await submitMessage(message);
-  }, [input, submitMessage, isThisConversationStreaming, queuedMessages, pendingUserInput, slashCommands, executeSlashCommand]);
+    await submitMessage(message, encodedFiles);
+  }, [input, attachments, submitMessage, isThisConversationStreaming, queuedMessages, pendingUserInput, slashCommands, executeSlashCommand, handleStop]);
 
   // Auto-submit pending message from use case selection
   useEffect(() => {
@@ -1219,24 +1396,12 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     }
   }, [activeConversationId, consumePendingMessage, submitMessage]);
 
-  const handleStop = useCallback(() => {
-    if (activeConversationId) {
-      cancelConversationRequest(activeConversationId);
-    }
-  }, [activeConversationId, cancelConversationRequest]);
-
   // Stable callback for feedback changes
   const handleFeedbackChange = useCallback((messageId: string, feedback: Feedback) => {
     if (activeConversationId) {
       updateMessageFeedback(activeConversationId, messageId, feedback);
     }
   }, [activeConversationId, updateMessageFeedback]);
-
-  // Feedback submission is handled by FeedbackButton → POST /api/feedback
-  // which writes to both Langfuse and the unified feedback MongoDB collection.
-  const handleFeedbackSubmit = useCallback(async (_messageId: string, _feedback: Feedback) => {
-    // no-op: POST /api/feedback handles both Langfuse + MongoDB
-  }, []);
 
   // Handle user input form submission via SSE/Dynamic Agents resume
   const handleUserInputSubmitSSE = useCallback(async (formData: Record<string, string>) => {
@@ -1283,7 +1448,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     setConversationStreaming(activeConversationId, {
       conversationId: activeConversationId,
       messageId: assistantMsgId,
-      client: { abort: () => adapter.abort() } as any,
+      client: { abort: () => adapter.abort() },
       streamAdapter: adapter,
     });
 
@@ -1402,7 +1567,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
     setConversationStreaming(activeConversationId, {
       conversationId: activeConversationId,
       messageId: assistantMsgId,
-      client: { abort: () => adapter.abort() } as any,
+      client: { abort: () => adapter.abort() },
       streamAdapter: adapter,
     });
 
@@ -1703,11 +1868,9 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
                           isCopied={copiedId === msg.id}
                           isStreaming={isAssistantStreaming}
                           isLatestAnswer={isLastAssistantMessage}
-                          onStop={isAssistantStreaming ? handleStop : undefined}
                           onRetry={getRetryContent() ? () => handleRetry(getRetryContent()!) : undefined}
                           feedback={msg.feedback}
                           onFeedbackChange={(feedback) => handleFeedbackChange(msg.id, feedback)}
-                          onFeedbackSubmit={(feedback) => handleFeedbackSubmit(msg.id, feedback)}
                           isRecovering={recoveringMessageId === msg.id}
                           conversationId={conversationId}
                           userDisplayName={userDisplayName}
@@ -1842,8 +2005,8 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
                 </>
               ) : readOnlyReason === 'agent_deleted' ? (
                 <>
-                  <span className="text-sm font-medium">Agent No Longer Exists</span>
-                  <span className="text-xs text-red-600 dark:text-red-500">— This agent has been deleted. You can view the history but cannot send new messages.</span>
+                  <span className="text-sm font-medium">Agent No Longer Available</span>
+                  <span className="text-xs text-red-600 dark:text-red-500">— This agent has been deprecated or deleted. You can view the history but cannot send new messages.</span>
                 </>
               ) : readOnlyReason === 'agent_disabled' ? (
                 <>
@@ -1857,7 +2020,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
                 </>
               )}
             </div>
-            {readOnlyReason === 'admin_audit' && (
+            {readOnlyReason === 'admin_audit' ? (
             <a
               href="/admin?tab=feedback"
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-amber-600/20 text-amber-700 dark:text-amber-300 hover:bg-amber-600/30 transition-colors"
@@ -1865,7 +2028,51 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
               <ArrowLeft className="h-3 w-3" />
               Back to Feedback
             </a>
-            )}
+            ) : (readOnlyReason === 'agent_deleted' || readOnlyReason === 'agent_disabled') ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              {showAgentPicker ? (
+                <>
+                  <div className="w-56">
+                    <AgentPicker
+                      options={availableAgents}
+                      value={chosenAgentId}
+                      onChange={setChosenAgentId}
+                      placeholder="Select an agent…"
+                      hideIdSuffix
+                    />
+                  </div>
+                  <button
+                    onClick={handleResumeWithChosenAgent}
+                    disabled={!chosenAgentId}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-red-600/20 text-red-700 dark:text-red-300 hover:bg-red-600/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Resume
+                  </button>
+                  <button
+                    onClick={() => setShowAgentPicker(false)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={handleStartNewConversation}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-red-600/20 text-red-700 dark:text-red-300 hover:bg-red-600/30 transition-colors"
+                  >
+                    Resume with default agent
+                  </button>
+                  <button
+                    onClick={() => setShowAgentPicker(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+                  >
+                    Choose agent
+                  </button>
+                </>
+              )}
+            </div>
+            ) : null}
           </div>
         </div>
       ) : (
@@ -1877,7 +2084,7 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
               <AnimatePresence mode="popLayout">
                 {queuedMessages.map((queuedMsg, index) => (
                   <motion.div
-                    key={`${index}-${queuedMsg.slice(0, 20)}`}
+                    key={`${index}-${queuedMsg.text.slice(0, 20)}`}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
@@ -1898,7 +2105,15 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
                           ×
                         </button>
                       </div>
-                      <p className="text-sm text-foreground/90 break-words">{queuedMsg}</p>
+                      {queuedMsg.text && (
+                        <p className="text-sm text-foreground/90 break-words">{queuedMsg.text}</p>
+                      )}
+                      {queuedMsg.files.length > 0 && (
+                        <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                          <Paperclip className="h-3 w-3" />
+                          {queuedMsg.files.length} attachment{queuedMsg.files.length > 1 ? "s" : ""}
+                        </div>
+                      )}
                     </div>
                   </motion.div>
                 ))}
@@ -1921,46 +2136,83 @@ export function ChatPanel({ endpoint, conversationId, conversationTitle, readOnl
               visible={showSlashMenu}
             />
 
-            <div className="relative flex items-center gap-3 bg-card rounded-xl border border-border p-3 transition-all duration-200">
-              <TextareaAutosize
-                ref={inputRef}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                placeholder={
-                  isThisConversationStreaming
-                    ? queuedMessages.length >= 3
-                      ? "Queue full (3/3). Send or cancel messages to queue more, or Cmd+Enter to force send..."
-                      : `Type to queue message (${queuedMessages.length}/3), or Cmd+Enter to force send...`
-                    : `Ask anything, or type / to see commands, skills, and agents...`
-                }
-                className="flex-1 bg-transparent resize-none outline-none px-3 py-2.5 text-sm"
-                minRows={1}
-                maxRows={10}
+            <div
+              className={cn(
+                "relative flex flex-col gap-2 bg-card rounded-xl border p-3 transition-all duration-200",
+                isDraggingFiles
+                  ? "border-primary ring-2 ring-primary/40"
+                  : "border-border",
+              )}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
+              {/* Hidden native picker driven by the paperclip button. */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ACCEPT_ATTRIBUTE}
+                className="hidden"
+                onChange={handleFileInputChange}
               />
-            {/* Send/Stop button - toggles based on streaming state */}
-            {isThisConversationStreaming ? (
-              <Button
-                size="icon"
-                onClick={handleStop}
-                variant="destructive"
-                className="shrink-0"
-                title="Stop generating"
-              >
-                <Square className="h-4 w-4" />
-              </Button>
-            ) : (
-              <Button
-                size="icon"
-                onClick={() => handleSubmit(false)}
-                disabled={!input.trim()}
-                variant="default"
-                className="shrink-0"
-                title="Send message"
-              >
-                <Send className="h-4 w-4" />
-              </Button>
-            )}
+
+              {/* Staged attachment previews (above the input row). */}
+              <AttachmentChips attachments={attachments} onRemove={removeAttachment} />
+
+              <div className="flex items-center gap-3">
+                <TextareaAutosize
+                  ref={inputRef}
+                  value={input}
+                  onChange={handleInputChange}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  placeholder={
+                    isThisConversationStreaming
+                      ? queuedMessages.length >= 3
+                        ? "Queue full (3/3). Send or cancel messages to queue more, or Cmd+Enter to force send..."
+                        : `Type to queue message (${queuedMessages.length}/3), or Cmd+Enter to force send...`
+                      : `Ask anything, or type / to see commands, skills, and agents...`
+                  }
+                  className="flex-1 bg-transparent resize-none outline-none px-3 py-2.5 text-sm"
+                  minRows={1}
+                  maxRows={10}
+                />
+                {/* Attach files */}
+                <Button
+                  size="icon"
+                  onClick={() => fileInputRef.current?.click()}
+                  variant="ghost"
+                  className="shrink-0"
+                  title="Attach files"
+                  aria-label="Attach files"
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+                {/* Send/Stop button - toggles based on streaming state */}
+                {isThisConversationStreaming ? (
+                  <Button
+                    size="icon"
+                    onClick={handleStop}
+                    variant="destructive"
+                    className="shrink-0"
+                    title="Stop generating"
+                  >
+                    <Square className="h-4 w-4" />
+                  </Button>
+                ) : (
+                  <Button
+                    size="icon"
+                    onClick={() => handleSubmit(false)}
+                    disabled={!input.trim() && attachments.length === 0}
+                    variant="default"
+                    className="shrink-0"
+                    title="Send message"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -2091,11 +2343,9 @@ interface ChatMessageProps {
   isCopied: boolean;
   isStreaming?: boolean;
   isLatestAnswer?: boolean;
-  onStop?: () => void;
   onRetry?: () => void;
   feedback?: Feedback;
   onFeedbackChange?: (feedback: Feedback) => void;
-  onFeedbackSubmit?: (feedback: Feedback) => void;
   conversationId?: string;
   isRecovering?: boolean;
   userDisplayName?: string;
@@ -2124,11 +2374,9 @@ const ChatMessage = React.memo(function ChatMessage({
   isCopied,
   isStreaming = false,
   isLatestAnswer = false,
-  onStop,
   onRetry,
   feedback,
   onFeedbackChange,
-  onFeedbackSubmit,
   conversationId,
   isRecovering = false,
   userDisplayName = "You",
@@ -2182,9 +2430,12 @@ const ChatMessage = React.memo(function ChatMessage({
           )}
         >
           {message.senderImage ? (
-            <img
+            <Image
               src={message.senderImage}
               alt={message.senderName || userDisplayName}
+              width={36}
+              height={36}
+              unoptimized
               className="w-9 h-9 rounded-xl object-cover"
             />
           ) : (
@@ -2249,13 +2500,20 @@ const ChatMessage = React.memo(function ChatMessage({
         {isUser ? (
           // ── User message bubble ──
           <>
-            <div
-              className="rounded-xl rounded-tr-sm relative overflow-hidden inline-block bg-primary text-primary-foreground px-4 py-3 max-w-full selection:bg-primary-foreground selection:text-primary"
-            >
-              <div className="overflow-hidden break-words text-left" style={{ overflowWrap: 'anywhere' }}>
-                <MarkdownRenderer content={message.content} variant="user" />
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="mb-2 flex w-full justify-end">
+                <MessageAttachments attachments={message.attachments} align="end" />
               </div>
-            </div>
+            )}
+            {message.content.trim() && (
+              <div
+                className="rounded-xl rounded-tr-sm relative overflow-hidden inline-block bg-primary text-primary-foreground px-4 py-3 max-w-full selection:bg-primary-foreground selection:text-primary"
+              >
+                <div className="overflow-hidden break-words text-left" style={{ overflowWrap: 'anywhere' }}>
+                  <MarkdownRenderer content={message.content} variant="user" />
+                </div>
+              </div>
+            )}
 
             <motion.div
               initial={{ opacity: 0 }}
@@ -2433,7 +2691,6 @@ const ChatMessage = React.memo(function ChatMessage({
                   conversationId={conversationId}
                   feedback={feedback}
                   onFeedbackChange={onFeedbackChange}
-                  onFeedbackSubmit={onFeedbackSubmit}
                 />
               </motion.div>
             )}
