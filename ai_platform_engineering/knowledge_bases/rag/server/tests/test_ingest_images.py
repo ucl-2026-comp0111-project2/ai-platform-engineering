@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.restapi import _image_collection_provider_matches
 from langchain_core.documents import Document
 
 from server.ingestion import DocumentProcessor, MAX_IMAGES_PER_DOCUMENT
@@ -28,8 +27,8 @@ def _make_image_vstore(existing_ids=None):
     """A mock image_vstore with aclient.query/aadd_embeddings wired for testing."""
     vstore = MagicMock()
     vstore.collection_name = "rag_images"
-    vstore.embedding_function = MagicMock()
-    vstore.embedding_function.embedder = MagicMock()
+    vstore.embeddings = MagicMock()
+    vstore.embeddings.embedder = MagicMock()
     vstore.aclient = AsyncMock()
     vstore.aclient.query.return_value = [{"pk": pk} for pk in (existing_ids or [])]
     vstore.aadd_embeddings = AsyncMock()
@@ -72,7 +71,7 @@ class TestIngestImages:
 
     async def test_new_image_is_embedded_and_stored_with_deterministic_id(self):
         image_vstore = _make_image_vstore()
-        image_vstore.embedding_function.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2, 0.3])
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2, 0.3])
         processor = _make_processor(image_vstore=image_vstore)
         image_url = "https://example.com/ant.jpg"
         doc = _make_doc("https://example.com/page", images=[{"url": image_url, "alt_text": "An ant"}])
@@ -102,7 +101,7 @@ class TestIngestImages:
         new_url = "https://example.com/new.jpg"
         existing_url = "https://example.com/existing.jpg"
         image_vstore = _make_image_vstore(existing_ids=[_image_id(existing_url)])
-        image_vstore.embedding_function.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2])
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2])
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc(
             "https://example.com/page",
@@ -120,7 +119,7 @@ class TestIngestImages:
 
     async def test_images_beyond_cap_are_not_embedded(self):
         image_vstore = _make_image_vstore()
-        image_vstore.embedding_function.embedder.embed_image_url = MagicMock(return_value=[0.1])
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1])
         processor = _make_processor(image_vstore=image_vstore)
         many_images = [{"url": f"https://example.com/img{i}.jpg", "alt_text": ""} for i in range(MAX_IMAGES_PER_DOCUMENT + 10)]
         doc = _make_doc("https://example.com/page", images=many_images)
@@ -132,7 +131,7 @@ class TestIngestImages:
 
     async def test_images_missing_url_are_skipped(self):
         image_vstore = _make_image_vstore()
-        image_vstore.embedding_function.embedder.embed_image_url = MagicMock(return_value=[0.1])
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1])
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc(
             "https://example.com/page",
@@ -147,7 +146,7 @@ class TestIngestImages:
     async def test_unsupported_format_is_skipped_without_retry(self):
         image_vstore = _make_image_vstore()
         embed_mock = MagicMock(side_effect=UnsupportedImageFormatError("bad format"))
-        image_vstore.embedding_function.embedder.embed_image_url = embed_mock
+        image_vstore.embeddings.embedder.embed_image_url = embed_mock
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=[{"url": "https://example.com/pic.svg", "alt_text": ""}])
 
@@ -159,7 +158,7 @@ class TestIngestImages:
     async def test_transient_failure_retries_then_succeeds(self):
         image_vstore = _make_image_vstore()
         embed_mock = MagicMock(side_effect=[RuntimeError("timeout"), [0.1, 0.2]])
-        image_vstore.embedding_function.embedder.embed_image_url = embed_mock
+        image_vstore.embeddings.embedder.embed_image_url = embed_mock
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=[{"url": "https://example.com/pic.jpg", "alt_text": ""}])
 
@@ -172,7 +171,7 @@ class TestIngestImages:
     async def test_all_attempts_failing_skips_image(self):
         image_vstore = _make_image_vstore()
         embed_mock = MagicMock(side_effect=RuntimeError("persistent failure"))
-        image_vstore.embedding_function.embedder.embed_image_url = embed_mock
+        image_vstore.embeddings.embedder.embed_image_url = embed_mock
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=[{"url": "https://example.com/pic.jpg", "alt_text": ""}])
 
@@ -187,43 +186,3 @@ class TestIngestImages:
 
 
 
-
-class TestImageCollectionProviderMatches:
-    """Tests for _image_collection_provider_matches (embedding model switch safety check)."""
-
-    def _make_vector_db(self, query_result, embedder_class_name: str):
-        vector_db = MagicMock()
-        vector_db.client.query.return_value = query_result
-        embedder = MagicMock()
-        embedder.__class__.__name__ = embedder_class_name
-        vector_db.embedding_function.embedder = embedder
-        return vector_db
-
-    def test_empty_collection_returns_true(self):
-        vector_db = self._make_vector_db(query_result=[], embedder_class_name="NovaMultimodalEmbedder")
-        assert _image_collection_provider_matches(vector_db, "rag_images") is True
-
-    def test_matching_provider_returns_true(self):
-        vector_db = self._make_vector_db(
-            query_result=[{"embedding_provider": "NovaMultimodalEmbedder"}],
-            embedder_class_name="NovaMultimodalEmbedder",
-        )
-        assert _image_collection_provider_matches(vector_db, "rag_images") is True
-
-    def test_mismatched_provider_returns_false(self):
-        vector_db = self._make_vector_db(
-            query_result=[{"embedding_provider": "NovaMultimodalEmbedder"}],
-            embedder_class_name="GeminiMultimodalEmbedder",
-        )
-        assert _image_collection_provider_matches(vector_db, "rag_images") is False
-
-    def test_query_failure_defaults_to_compatible(self):
-        vector_db = MagicMock()
-        vector_db.client.query.side_effect = Exception("connection error")
-        assert _image_collection_provider_matches(vector_db, "rag_images") is True
-
-    def test_missing_embedder_treated_as_no_match(self):
-        vector_db = MagicMock()
-        vector_db.client.query.return_value = [{"embedding_provider": "NovaMultimodalEmbedder"}]
-        vector_db.embedding_function = MagicMock(spec=[])
-        assert _image_collection_provider_matches(vector_db, "rag_images") is False
