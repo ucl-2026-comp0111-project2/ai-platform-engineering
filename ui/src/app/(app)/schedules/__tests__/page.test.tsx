@@ -422,7 +422,7 @@ describe("SchedulesPage", () => {
     expect(mockRouterPush).toHaveBeenCalledWith("/chat/conversation-1");
   });
 
-  it("falls back to the platform default agent for schedule edit chat", async () => {
+  it("uses the MongoDB scheduler editor agent when no schedule-specific agent is set", async () => {
     (global.fetch as jest.Mock)
       .mockResolvedValueOnce({
         ok: true,
@@ -458,20 +458,10 @@ describe("SchedulesPage", () => {
         ok: true,
         json: async () => ({
           success: true,
-          data: { default_agent_id: "agent-platform-default" },
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          success: true,
-          data: [
-            {
-              _id: "agent-platform-default",
-              name: "Platform Default",
-              enabled: true,
-            },
-          ],
+          data: {
+            schedule_editor_agent_id: "agent-mongodb-scheduler-editor",
+            schedule_editor_agent_source: "db",
+          },
         }),
       });
 
@@ -485,7 +475,9 @@ describe("SchedulesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Chat with agent" }));
 
     await waitFor(() =>
-      expect(mockCreateConversation).toHaveBeenCalledWith("agent-platform-default")
+      expect(mockCreateConversation).toHaveBeenCalledWith(
+        "agent-mongodb-scheduler-editor"
+      )
     );
     expect(global.fetch).toHaveBeenCalledWith(
       "/api/admin/platform-config",

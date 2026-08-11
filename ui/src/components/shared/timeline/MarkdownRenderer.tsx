@@ -10,6 +10,8 @@ import remend from "remend";
 import { bundledLanguages,createHighlighter,type BundledLanguage,type Highlighter } from "shiki";
 import "./streaming-markdown.css";
 
+const BLOCK_TAGS = new Set(["P", "UL", "OL", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "TABLE", "HR", "DIV"]);
+
 // ═══════════════════════════════════════════════════════════════
 // Shiki highlighter — lazy singleton, loads languages on demand
 // ═══════════════════════════════════════════════════════════════
@@ -89,6 +91,7 @@ function escapeHtml(text: string) {
 
 const purifyConfig = {
   USE_PROFILES: { html: true },
+  ADD_ATTR: ["target", "rel"] as string[],
   FORBID_TAGS: ["style"] as string[],
   FORBID_CONTENTS: ["style", "script"] as string[],
 };
@@ -96,6 +99,14 @@ const purifyConfig = {
 function sanitize(html: string): string {
   if (typeof window === "undefined") return html;
   return DOMPurify.sanitize(html, purifyConfig);
+}
+
+function decorateLinks(root: HTMLDivElement) {
+  const links = root.querySelectorAll("a[href]");
+  for (const link of links) {
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noopener noreferrer");
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -232,7 +243,6 @@ export function MarkdownRenderer({
   streamingRef.current = isStreaming;
 
   /** Block-level tags that get the fade-in animation during streaming. */
-  const BLOCK_TAGS = new Set(["P", "UL", "OL", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "TABLE", "HR", "DIV"]);
 
   const patchDom = useCallback((html: string) => {
     const container = containerRef.current;
@@ -246,6 +256,7 @@ export function MarkdownRenderer({
     // Build temp element, decorate, then morph
     const temp = document.createElement("div");
     temp.innerHTML = html;
+    decorateLinks(temp);
     decorateCopyButtons(temp);
 
     morphdom(container, temp, {

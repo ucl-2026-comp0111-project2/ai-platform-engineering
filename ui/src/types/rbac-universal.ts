@@ -56,6 +56,7 @@ export const UNIVERSAL_REBAC_RESOURCE_TYPE_NAMES = [
   "knowledge_base",
   "data_source",
   "mcp_tool",
+  "ingestion_source",
   "document",
   "skill",
   "task",
@@ -74,6 +75,7 @@ export type UniversalRebacSubjectType =
   | "team"
   | "slack_channel"
   | "webex_space"
+  | "webex_bot_installation"
   | "external_group"
   | "service_account";
 

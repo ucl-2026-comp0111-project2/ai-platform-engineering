@@ -22,7 +22,8 @@
     "test:e2e:rbac-live-rich": "RUN_RBAC_E2E=1 playwright test e2e/rbac/rbac-rich-local-regression-live.spec.ts --config=playwright.rbac.config.ts",
     "test:e2e:rbac-live-rich-keep": "RUN_RBAC_E2E=1 RBAC_RICH_KEEP_FIXTURE=1 playwright test e2e/rbac/rbac-rich-local-regression-live.spec.ts --config=playwright.rbac.config.ts",
     "test:e2e:rbac-live-rich-cleanup": "RUN_RBAC_E2E=1 playwright test e2e/rbac/rbac-rich-local-regression-live.spec.ts --config=playwright.rbac.config.ts",
-    "test:e2e:rbac-live-full": "RUN_RBAC_E2E=1 playwright test e2e/rbac/openfga-live.spec.ts e2e/rbac/mcp-server-create-live.spec.ts e2e/rbac/resource-lifecycle-live.spec.ts e2e/rbac/credential-team-sharing.spec.ts e2e/rbac/rbac-rich-local-regression-live.spec.ts --config=playwright.rbac.config.ts"
+    "test:e2e:rbac-live-full": "RUN_RBAC_E2E=1 playwright test e2e/rbac/openfga-live.spec.ts e2e/rbac/mcp-server-create-live.spec.ts e2e/rbac/resource-lifecycle-live.spec.ts e2e/rbac/credential-team-sharing.spec.ts e2e/rbac/rbac-rich-local-regression-live.spec.ts --config=playwright.rbac.config.ts",
+    "test:e2e:token-refresh": "RUN_RBAC_E2E=1 playwright test e2e/rbac/token-refresh.spec.ts --config=playwright.rbac.config.ts"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "3.1051.0",
@@ -54,7 +55,7 @@
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "date-fns": "4.1.0",
-    "dompurify": "3.4.11",
+    "dompurify": "3.4.12",
     "framer-motion": "12.38.0",
     "graphology": "0.26.0",
     "graphology-layout-forceatlas2": "0.10.1",
@@ -68,7 +69,7 @@
     "marked-shiki": "1.2.1",
     "mongodb": "7.1.1",
     "morphdom": "2.7.8",
-    "next": "16.2.6",
+    "next": "16.2.11",
     "next-auth": "4.24.13",
     "next-themes": "0.4.6",
     "nunjucks": "3.2.4",
@@ -146,6 +147,6 @@
     "@typescript-eslint/typescript-estree": "8.58.0",
     "@typescript-eslint/utils": "8.58.0",
     "@typescript-eslint/visitor-keys": "8.58.0",
-    "dompurify": "3.4.11"
+    "dompurify": "3.4.12"
   }
 }

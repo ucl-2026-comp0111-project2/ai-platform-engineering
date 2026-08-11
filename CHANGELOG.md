@@ -1,3 +1,409 @@
+## 0.5.67 (2026-08-04)
+
+### Fix
+
+- **ui**: grant unlinked service account can_use when agent shared with Everyone
+
+## 0.5.66-dev.1 (2026-08-04)
+
+### Feat
+
+- **ui**: add dropped input files panel to metrics tab
+- **dynamic-agents**: track dropped input files and add multimodal regression harness
+
+## 0.5.66 (2026-07-31)
+
+## 0.5.65-dev.1 (2026-07-30)
+
+### Fix
+
+- **slack-bot**: route messages with file attachments (#2328)
+
+## 0.5.65 (2026-07-30)
+
+## 0.5.64-dev.1 (2026-07-30)
+
+### Fix
+
+- **dynamic-agents**: send text-family documents as A (#2327)
+
+## 0.5.64 (2026-07-29)
+
+## 0.5.63-dev.4 (2026-07-29)
+
+### Feat
+
+- **ui**: allow chat title edit and open links in a new tab
+
+### Fix
+
+- **dynamic-agents**: pin boto3 to satisfy pinned-deps CI check
+- **ci**: skip PR version-bump auto-commit for Dependabot PRs (#2322)
+- **dynamic-agents**: coerce GridFS namespace components to str before Mongo queries (#2319)
+- **dynamic-agents**: don't double-add Anthropic prompt-caching middleware
+- **dynamic-agents**: use native prompt-caching middleware for Bedrock
+- **dynamic-agents**: declare boto3 without a version pin
+
+## 0.5.63-dev.2 (2026-07-28)
+
+## 0.5.63-dev.1 (2026-07-28)
+
+### Feat
+
+- **rag**: self-service RAG ingestion-source config store (PR1/7) (#2286)
+
+### Fix
+
+- **dynamic-agents**: pin boto3==1.43.16 to match cnoe-agent-utils
+
+## 0.5.63 (2026-07-28)
+
+### Fix
+
+- **credentials**: load caller teams in secret sharing (#2312)
+
+## 0.5.62 (2026-07-26)
+
+## 0.5.61-dev.3 (2026-07-24)
+
+### Fix
+
+- **webex-wdm**: also refresh WDM device on ConnectionClosedOK
+- **webex-wdm**: refresh WDM device on ConnectionClosedError to avoid stale webSocketUrl loop
+- **skills**: isCatalogKey must match user:-prefixed subject
+- **skills**: catalog key returns hub and global agent_skills, not only default
+- **skills**: catalog key and local skills JWT missing sub drops all skills
+
+## 0.5.61-dev.2 (2026-07-24)
+
+### Fix
+
+- **rag**: recurse into sitemap index children instead of scraping them as pages (#2293)
+
+## 0.5.61-dev.1 (2026-07-24)
+
+### Fix
+
+- **CI**: ui
+
+## 0.5.61 (2026-07-24)
+
+## 0.5.60-dev.5 (2026-07-24)
+
+### Fix
+
+- **ui**: add proactive session keepalive to prevent SSO idle timeout (#2288)
+
+## 0.5.60-dev.4 (2026-07-23)
+
+### Feat
+
+- **docs**: include info on UI admin access to update scheduler ediotr agent
+- **helm**: change restrictedMcpServers default to none and update docs on how to restrict scheduler to admin only
+- **scheduler**: allow admin to modify default schedule editor agent in the ui
+- **dynamic-agents**: offload multimodal attachment bytes to object store
+
+### Fix
+
+- **webex**: add per-user OAuth token support via X-CAIPE-Provider-Token
+- **confluence**: add OAuth Bearer auth for Atlassian 3LO tokens
+- fix scheduler ui tab acceess
+- **scheduler**: if admin only access do not make scheduler tab visible for normal users
+- **dynamic-agents**: thread files into _stream_impl so attachments reach the model
+
+## 0.5.60-dev.3 (2026-07-23)
+
+### Fix
+
+- **insights**: scope user drawer and paginate top users (#2285)
+
+## 0.5.60-dev.2 (2026-07-23)
+
+### Feat
+
+- **ui**: link feedback trends to daily feedback (#2283)
+- **dynamic-agents**: name model in skip warning, notify the model, and cap input attachments
+
+## 0.5.60-dev.1 (2026-07-23)
+
+### Fix
+
+- **rag**: RAG RBAC coverage audit and dead-code cleanup (#2269)
+
+## 0.5.60 (2026-07-23)
+
+### Fix
+
+- **rbac**: sync OIDC group membership tuples without pre-configured rules (#2282)
+
+## 0.5.59-dev.1 (2026-07-23)
+
+### Feat
+
+- **ui**: remote MCP catalog with OAuth credential connectors (#2263)
+
+## 0.5.59 (2026-07-23)
+
+### Fix
+
+- **helm**: default dynamic-agents CAIPE_API_URL from release name (#2255)
+- **ci**: stop hard-failing CI for fork PRs from outside contributors (#2281)
+
+## 0.5.58-dev.3 (2026-07-22)
+
+### Feat
+
+- **ui**: add admin filter deep links (#2279)
+
+### Fix
+
+- **ci**: disambiguate digest artifact patterns to prevent name-prefix collisions (#2277)
+
+## 0.5.58-dev.2 (2026-07-22)
+
+### Feat
+
+- **metrics**: add steady-state operations dashboard (#2278)
+
+## 0.5.58-dev.1 (2026-07-22)
+
+### Fix
+
+- **ui**: compare positive and negative feedback trends (#2276)
+
+## 0.5.58 (2026-07-22)
+
+### Fix
+
+- **ci**: build remaining 11 CI image workflows natively per-arch (#2274)
+- **workflow**: do global check correctly
+- **ci**: build rag images natively per-arch instead of QEMU-emulated arm64 (#2272)
+
+## 0.5.57 (2026-07-22)
+
+## 0.5.56-dev.4 (2026-07-22)
+
+### Fix
+
+- **insights**: apply filters consistently across cards (#2270)
+
+## 0.5.56-dev.3 (2026-07-22)
+
+### Fix
+
+- **insights**: count only assistant messages (#2267)
+
+## 0.5.56-dev.2 (2026-07-22)
+
+### Fix
+
+- **ui**: load admin insights cards independently (#2260)
+
+## 0.5.56-dev.1 (2026-07-22)
+
+### Fix
+
+- **insights**: refresh stats and restore user activity (#2259)
+
+## 0.5.56 (2026-07-21)
+
+## 0.5.55-dev.6 (2026-07-21)
+
+### Fix
+
+- **insights**: remove self-resolution and est. hours saved stats (#2256)
+
+## 0.5.55-dev.5 (2026-07-20)
+
+### Fix
+
+- **ci**: scope GitHub App token permissions in prebuild artifact comment workflow (#2250)
+
+## 0.5.55-dev.4 (2026-07-20)
+
+## 0.5.55-dev.3 (2026-07-20)
+
+### Feat
+
+- **ui**: mint signed agent context for MCP tool callers
+
+### Fix
+
+- **openfga-bridge**: shorten local context TTL to 8h, fix audit obj, add prebuild image flow
+- **ui**: stop revoking agent-context grants before caller can use them
+
+## 0.5.55-dev.2 (2026-07-20)
+
+### Feat
+
+- **ui**: scope admin insights by owned agents and add agent filter (#2209)
+
+## 0.5.55-dev.1 (2026-07-20)
+
+### Feat
+
+- **auth**: OIDC_GROUP_INCLUDELIST and OIDC_GROUP_EXCLUDELIST for AD group sync filtering (#2237)
+- **ci**: link failed CIs and initiated gh user in the release draft to take action
+- **dynamic-agents**: declare per-model input capabilities and degrade cleanly
+
+### Fix
+
+- **e2e**: drive the MCP tool picker as a combobox, not a <select>
+- **service-accounts**: let org admins manage service accounts outside their own team
+- **service-accounts**: org admins see all SAs; add search + pagination
+- **dev**: clear OIDC_AUDIENCE for dynamic-agents so OBO tokens validate
+- **slack**: reject Slack files:read login-page HTML before sending to model
+
+### Refactor
+
+- **mcp**: restyle MCP lab tool picker as a searchable combobox
+
+## 0.5.55 (2026-07-17)
+
+## 0.5.54-dev.3 (2026-07-17)
+
+### Feat
+
+- support multiple Webex bots and 1:1  (#2184)
+- **ui**: show uploaded attachments in the chat transcript
+- **ui**: attach files to chat messages as multimodal input
+- **slack-bot**: forward Slack attachments as multimodal chat input
+- **dynamic-agents**: support multimodal file+text chat input
+
+## 0.5.54-dev.2 (2026-07-16)
+
+## 0.5.54-dev.1 (2026-07-16)
+
+### Feat
+
+- **platform**: add per-surface default agents (#2233)
+
+## 0.5.54 (2026-07-16)
+
+## 0.5.53-dev.5 (2026-07-16)
+
+## 0.5.53-dev.4 (2026-07-16)
+
+### Fix
+
+- **slack-bot**: resolve channel_id from view.private_metadata for modal submits
+- **slack-bot**: bind OBO token in feedback/retry/escalation handlers
+- **slack-bot**: register conversation before VictorOps on-call lookup
+
+## 0.5.53-dev.3 (2026-07-16)
+
+### Feat
+
+- **ui**: improve admin access preview and default agents (#2218)
+
+### Fix
+
+- **admin-users**: create team_membership_sources index at boot, not via migration
+- **admin-users**: drop stray teams dep causing double-fetch on Users tab
+- **admin-users**: paginate team membership lookup in Mongo, not Node
+- **admin-users**: page team-scoped Keycloak lookups for plain members
+
+## 0.5.53-dev.2 (2026-07-16)
+
+### Feat
+
+- **ci**: add prebuild webex bot. WHY WAS THIS NOT ADDED BEFORE?
+
+### Fix
+
+- **ui**: eliminate lint violations and enforce CI (#2211)
+
+## 0.5.53-dev.1 (2026-07-16)
+
+### Feat
+
+- **ui**: animate shared tab selectors (#2217)
+
+## 0.5.53 (2026-07-15)
+
+## 0.5.52-dev.2 (2026-07-15)
+
+### Feat
+
+- **keycloak**: configurable SSO session lifetime, default 7d idle / 14d max
+
+### Fix
+
+- **ui**: remove AccessTokenMissing dead code and clear auth flag on recovery
+
+## 0.5.52-dev.1 (2026-07-15)
+
+### Feat
+
+- **ui**: add 'Choose agent' button alongside 'Resume with default agent' in deprecated-agent banner
+
+### Fix
+
+- **ci**: resolve ruff and jest failures blocking deprecated-agent PR
+- **ui**: patch Zustand store after re-linking deprecated-agent conversation
+- **ui**: show history and resume CTA for deprecated-agent conversations
+
+## 0.5.52 (2026-07-15)
+
+### Fix
+
+- **ui**: scroll unlinked access modal body instead of overflowing
+
+## 0.5.51-dev.5 (2026-07-15)
+
+### Fix
+
+- **slack-bot**: pass agent_id when resolving conversation for message delete
+- **slack-bot**: pass agent_id when resolving conversation for Get help escalation
+
+## 0.5.51-dev.4 (2026-07-15)
+
+## 0.5.51-dev.3 (2026-07-15)
+
+### Fix
+
+- **ui**: tolerate transient silent-refresh failures before forcing logout (#2220)
+- **ui**: add deep links for agent resources (#2212)
+
+## 0.5.51-dev.2 (2026-07-14)
+
+### Feat
+
+- **dynamic-agents**: pass METRICS_PORT through in dev compose
+- **dynamic-agents**: make metrics port configurable
+
+## 0.5.51-dev.1 (2026-07-14)
+
+### Fix
+
+- **ui**: repair admin view-as access preview (#2206)
+
+## 0.5.51 (2026-07-13)
+
+## 0.5.50-dev.2 (2026-07-13)
+
+### Fix
+
+- **slack-bot**: demote profiling stage logs from INFO to DEBUG
+- **slack-bot**: filter OpenFGA tuple read server-side by channel subject
+- **slack-bot**: add stage timing logs to profile routing delay
+
+## 0.5.50-dev.1 (2026-07-13)
+
+### Feat
+
+- **idp-sync**: log per-stage progress through a directory sync
+- **docs**: add vidcast links for scheduler and mcp webex meetings
+
+### Fix
+
+- **idp-sync**: make the plan/reconcile chain async and O(n) to keep probes alive
+- **idp-sync**: yield the event loop during synchronous member passes
+- **idp-sync**: bootstrap baseline access before team apply and parallelize member resolution
+- **rbac**: bootstrap member baseline for directory-synced users
+
+## 0.5.50 (2026-07-10)
+
 ## 0.5.49-dev.2 (2026-07-10)
 
 ### Fix
