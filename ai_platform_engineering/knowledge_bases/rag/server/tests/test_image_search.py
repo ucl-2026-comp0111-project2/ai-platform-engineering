@@ -1,4 +1,4 @@
-"""Tests for live image search against the CAIPE image collection."""
+"""Tests for image retrieval against the CAIPE image collection."""
 from pathlib import Path
 import sys
 
@@ -8,13 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "common" / "src"))
 sys.path.insert(0, str(ROOT / "server" / "src"))
 
-from server.image_search import (  # noqa: E402
-  compute_smoke_metrics,
-  download_image_results,
-  inspect_image_collection,
-  search_image,
-  search_text,
-)
+from server.image_search import inspect_image_collection, search_image, search_text  # noqa: E402
 
 
 class FakeEmbedder:
@@ -43,7 +37,7 @@ class FakeMilvusClient:
           "text": "https://example.com/corpus-image.png",
           "alt_text": "Example diagram",
           "source_document": "https://example.com/page",
-          "embedding_provider": "nova",
+          "embedding_provider": "FakeEmbedder",
         },
       }
     ]
@@ -87,7 +81,7 @@ def test_inspect_image_collection_reports_schema():
   assert "alt_text" in info.output_fields
 
 
-def test_search_image_uses_live_embedding_and_returns_results(tmp_path):
+def test_search_image_generates_embedding_and_returns_results(tmp_path):
   image_path = tmp_path / "query.png"
   image_path.write_bytes(b"fake-png")
   client = FakeMilvusClient()
@@ -101,29 +95,40 @@ def test_search_image_uses_live_embedding_and_returns_results(tmp_path):
   assert results[0].score == 0.91
   assert results[0].image_id == "img_123"
   assert results[0].image_url == "https://example.com/corpus-image.png"
-  assert results[0].embedding_provider == "nova"
+  assert results[0].embedding_provider == "FakeEmbedder"
   assert client.search_calls[0]["anns_field"] == "vector"
   assert client.search_calls[0]["data"] == [[0.1, 0.2, 0.3]]
-  assert client.search_calls[0]["limit"] == 1
+  assert client.search_calls[0]["limit"] == 3
 
 
-def test_search_image_filters_by_embedding_provider(tmp_path):
+def test_search_image_excludes_explicitly_incompatible_provider(tmp_path):
   image_path = tmp_path / "query.png"
   image_path.write_bytes(b"fake-png")
-  client = FakeMilvusClient()
+  client = FakeMilvusClient(hits=[
+    {
+      "id": "wrong-provider",
+      "distance": 0.1,
+      "entity": {"text": "https://example.com/wrong.png", "embedding_provider": "GeminiMultimodalEmbedder"},
+    },
+    {
+      "id": "right-provider",
+      "distance": 0.2,
+      "entity": {"text": "https://example.com/right.png", "embedding_provider": "NovaMultimodalEmbedder"},
+    },
+  ])
 
-  search_image(
+  results = search_image(
     image_path,
     top_k=2,
     client=client,
     embedder=FakeEmbedder(),
-    embedding_provider="nova",
+    embedding_provider="NovaMultimodalEmbedder",
   )
 
-  assert client.search_calls[0]["filter"] == '(embedding_provider == "nova")'
+  assert [result.image_id for result in results] == ["right-provider"]
 
 
-def test_search_image_combines_provider_and_custom_filter(tmp_path):
+def test_search_image_preserves_custom_filter(tmp_path):
   image_path = tmp_path / "query.png"
   image_path.write_bytes(b"fake-png")
   client = FakeMilvusClient()
@@ -136,20 +141,27 @@ def test_search_image_combines_provider_and_custom_filter(tmp_path):
     search_filter='source_type == "web"',
   )
 
-  assert client.search_calls[0]["filter"] == '(source_type == "web") and (embedding_provider == "nova")'
+  assert client.search_calls[0]["filter"] == 'source_type == "web"'
 
 
-def test_search_image_rejects_unsafe_embedding_provider(tmp_path):
+def test_search_image_allows_records_without_provider_metadata(tmp_path):
   image_path = tmp_path / "query.png"
   image_path.write_bytes(b"fake-png")
+  client = FakeMilvusClient(hits=[{
+    "id": "current-record",
+    "distance": 0.1,
+    "entity": {"text": "https://example.com/current.png"},
+  }])
 
-  with pytest.raises(ValueError, match="embedding_provider"):
-    search_image(
-      image_path,
-      client=FakeMilvusClient(),
-      embedder=FakeEmbedder(),
-      embedding_provider='nova" or source_type == "web"',
-    )
+  results = search_image(
+    image_path,
+    client=client,
+    embedder=FakeEmbedder(),
+    embedding_provider="NovaMultimodalEmbedder",
+  )
+
+  assert [result.image_id for result in results] == ["current-record"]
+  assert "filter" not in client.search_calls[0]
 
 
 def test_search_image_rejects_dimension_mismatch(tmp_path):
@@ -164,46 +176,78 @@ def test_search_image_rejects_dimension_mismatch(tmp_path):
     )
 
 
-def test_search_text_uses_live_embedding_and_returns_results():
+def test_search_text_generates_embedding_and_returns_results():
   client = FakeMilvusClient()
   embedder = FakeEmbedder()
 
   results = search_text(
-    "NASA logo with a blue circle and red vector",
+    "Example logo with a blue circle and red mark",
     top_k=1,
     client=client,
     embedder=embedder,
     candidate_k=1,
   )
 
-  assert embedder.texts == ["NASA logo with a blue circle and red vector"]
+  assert embedder.texts == ["Example logo with a blue circle and red mark"]
   assert len(results) == 1
   assert results[0].image_url == "https://example.com/corpus-image.png"
   assert client.search_calls[0]["data"] == [[0.1, 0.2, 0.3]]
   assert client.search_calls[0]["limit"] == 1
-  assert client.search_calls[0]["filter"] == '(embedding_provider == "FakeEmbedder")'
+  assert "filter" not in client.search_calls[0]
 
 
-def test_search_text_allows_explicit_provider_filter_override():
-  client = FakeMilvusClient()
+def test_search_text_allows_records_without_provider_metadata():
+  client = FakeMilvusClient(hits=[{
+    "id": "current-record",
+    "distance": 0.1,
+    "entity": {"text": "https://example.com/current.png", "alt_text": "Example logo"},
+  }])
 
-  search_text(
-    "NASA logo",
+  results = search_text(
+    "Example logo",
     top_k=1,
     client=client,
     embedder=FakeEmbedder(),
     embedding_provider="NovaMultimodalEmbedder",
   )
 
-  assert client.search_calls[0]["filter"] == (
-    '(embedding_provider == "NovaMultimodalEmbedder")'
+  assert [result.image_id for result in results] == ["current-record"]
+  assert "filter" not in client.search_calls[0]
+
+
+def test_search_text_excludes_explicitly_incompatible_provider():
+  hits = [
+    {
+      "id": "wrong-provider",
+      "distance": 0.1,
+      "entity": {
+        "text": "https://example.com/wrong.png",
+        "embedding_provider": "GeminiMultimodalEmbedder",
+      },
+    },
+    {
+      "id": "unlabelled",
+      "distance": 0.2,
+      "entity": {"text": "https://example.com/example-logo.png", "alt_text": "Example logo"},
+    },
+  ]
+
+  results = search_text(
+    "Example logo",
+    top_k=2,
+    candidate_k=2,
+    client=FakeMilvusClient(hits=hits),
+    embedder=FakeEmbedder(),
+    embedding_provider="NovaMultimodalEmbedder",
   )
+
+  assert [result.image_id for result in results] == ["unlabelled"]
 
 
 def test_search_text_rejects_dimension_mismatch():
   with pytest.raises(RuntimeError, match="dimension"):
     search_text(
-      "NASA logo",
+      "Example logo",
       client=FakeMilvusClient(dim=1024),
       embedder=FakeEmbedder(vector=[0.1, 0.2, 0.3]),
     )
@@ -224,15 +268,15 @@ def test_search_text_reranks_vector_candidates_with_metadata():
       "id": "nasa_logo",
       "distance": 0.12,
       "entity": {
-        "text": "https://nasa.gov/nasa-insignia-logo.png",
-        "source_document": "https://nasa.gov/brand-guidelines",
-        "alt_text": "NASA logo insignia",
+        "text": "https://example.com/example-insignia-logo.png",
+        "source_document": "https://example.com/brand-guidelines",
+        "alt_text": "Example logo insignia",
       },
     },
   ]
 
   results = search_text(
-    "NASA logo",
+    "Example logo",
     top_k=2,
     candidate_k=2,
     metadata_weight=0.8,
@@ -248,60 +292,38 @@ def test_search_text_reranks_vector_candidates_with_metadata():
 def test_search_text_rejects_invalid_metadata_weight():
   with pytest.raises(ValueError, match="metadata_weight"):
     search_text(
-      "NASA logo",
+      "Example logo",
       metadata_weight=1.1,
       client=FakeMilvusClient(),
       embedder=FakeEmbedder(),
     )
 
 
-def test_compute_smoke_metrics_expected_url():
-  results = search_image(
-    "query.png",
-    client=FakeMilvusClient(),
-    embedder=FakeEmbedder(),
-  )
-
-  metrics = compute_smoke_metrics(
-    results,
-    expected_url="https://example.com/corpus-image.png",
-  )
-
-  assert metrics["result_count"] == 1
-  assert metrics["expected_match_found"] is True
-  assert metrics["expected_match_rank"] == 1
-  assert metrics["expected_match_mrr"] == 1.0
+@pytest.mark.parametrize("search", [search_image, search_text])
+def test_search_rejects_non_positive_top_k(search, tmp_path):
+  query = tmp_path / "query.png" if search is search_image else "Example logo"
+  with pytest.raises(ValueError, match="top_k"):
+    search(query, top_k=0, client=FakeMilvusClient(), embedder=FakeEmbedder())
 
 
-class FakeDownloadResponse:
-  headers = {"Content-Type": "image/png"}
-
-  def __enter__(self):
-    return self
-
-  def __exit__(self, exc_type, exc, tb):
-    return False
-
-  def read(self):
-    return b"fake-retrieved-image"
+@pytest.mark.parametrize("search", [search_image, search_text])
+def test_search_rejects_excessive_top_k(search, tmp_path):
+  query = tmp_path / "query.png" if search is search_image else "Example logo"
+  with pytest.raises(ValueError, match="top_k"):
+    search(query, top_k=101, client=FakeMilvusClient(), embedder=FakeEmbedder())
 
 
-def test_download_image_results_writes_retrieved_image(tmp_path):
-  results = search_image(
-    "query.png",
-    client=FakeMilvusClient(),
-    embedder=FakeEmbedder(),
-  )
+def test_search_text_rejects_invalid_candidate_k():
+  with pytest.raises(ValueError, match="candidate_k"):
+    search_text(
+      "Example logo",
+      top_k=5,
+      candidate_k=4,
+      client=FakeMilvusClient(),
+      embedder=FakeEmbedder(),
+    )
 
-  downloaded = download_image_results(
-    results,
-    tmp_path,
-    opener=lambda request, timeout: FakeDownloadResponse(),
-  )
 
-  assert downloaded[0].download_error is None
-  assert downloaded[0].downloaded_path is not None
-  output_path = Path(downloaded[0].downloaded_path)
-  assert output_path.exists()
-  assert output_path.name == "01_img_123.png"
-  assert output_path.read_bytes() == b"fake-retrieved-image"
+def test_search_text_rejects_empty_query():
+  with pytest.raises(ValueError, match="text query"):
+    search_text("  ", client=FakeMilvusClient(), embedder=FakeEmbedder())

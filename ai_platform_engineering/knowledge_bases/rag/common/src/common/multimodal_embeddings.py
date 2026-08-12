@@ -9,19 +9,9 @@ from urllib.parse import urlparse
 
 import requests
 
-try:
-  from langchain_core.embeddings import Embeddings
-except ImportError:
-  class Embeddings:
-    """Fallback so standalone image-search tooling can load without LangChain."""
+from langchain_core.embeddings import Embeddings
 
-try:
-  from common.utils import get_logger
-except ImportError:
-  import logging
-
-  def get_logger(name: str) -> logging.Logger:
-    return logging.getLogger(name)
+from common.utils import get_logger
 
 logger = get_logger(__name__)
 

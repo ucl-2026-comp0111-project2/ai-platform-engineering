@@ -930,7 +930,6 @@ class DocumentProcessor:
   async def _embed_and_store_images(self, to_process: List[Tuple[Document, str]]) -> int:
     """Embed images concurrently (thread pool), then batch-insert pre-computed vectors."""
     embedder = getattr(self.image_vstore.embeddings, "embedder", None)
-    embedding_provider = embedder.__class__.__name__ if embedder is not None else None
     semaphore = asyncio.Semaphore(IMAGE_EMBED_CONCURRENCY)
     loop = asyncio.get_event_loop()
 
@@ -946,10 +945,7 @@ class DocumentProcessor:
         continue
       texts.append(doc.page_content)
       embeddings.append(vector)
-      metadata = dict(doc.metadata)
-      if embedding_provider:
-        metadata["embedding_provider"] = embedding_provider
-      metadatas.append(metadata)
+      metadatas.append(doc.metadata)
       ids.append(doc_id)
 
     if not texts:

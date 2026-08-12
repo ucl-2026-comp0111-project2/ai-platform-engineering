@@ -1,28 +1,19 @@
-"""Live image search against the CAIPE image vector collection.
-
-This module implements the query side for image-to-image and text-to-image retrieval. Linda's
-multimodal ingestion stores webpage image embeddings in Milvus. This module
-embeds a local query image or text query with the configured multimodal model and
-searches the same image collection.
-"""
+"""Image-to-image and text-to-image retrieval over CAIPE image embeddings."""
 from __future__ import annotations
 
-import argparse
-import json
-import mimetypes
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-from urllib.error import URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 from common.multimodal_embeddings import BaseMultimodalEmbedder, MultimodalEmbeddingsFactory
 
 DEFAULT_IMAGE_COLLECTION = os.getenv("IMAGE_COLLECTION_NAME", "rag_images")
 DEFAULT_MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+MAX_TOP_K = 100
+MAX_CANDIDATES = 300
 DEFAULT_OUTPUT_FIELDS = [
   "text",
   "pk",
@@ -30,8 +21,6 @@ DEFAULT_OUTPUT_FIELDS = [
   "alt_text",
   "embedding_provider",
 ]
-_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-_SAFE_FILTER_VALUE_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _QUERY_STOP_WORDS = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}
 _QUERY_SYNONYMS = {
@@ -64,12 +53,10 @@ class ImageSearchResult:
   embedding_provider: Optional[str] = None
   rerank_score: Optional[float] = None
   metadata_score: Optional[float] = None
-  downloaded_path: Optional[str] = None
-  download_error: Optional[str] = None
   metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-def _import_milvus_client():
+def _import_milvus_client() -> Any:
   try:
     from pymilvus import MilvusClient
   except ImportError as exc:
@@ -103,12 +90,12 @@ def _field_type_name(field_type: Any) -> str:
 
 
 def _find_vector_field(fields: Sequence[Dict[str, Any]]) -> Optional[str]:
-  for field in fields:
-    field_type = _field_type_name(field.get("type"))
+  for schema_field in fields:
+    field_type = _field_type_name(schema_field.get("type"))
     if "VECTOR" in field_type:
-      return field.get("name")
+      return schema_field.get("name")
   for candidate in ("vector", "dense", "embedding"):
-    if any(field.get("name") == candidate for field in fields):
+    if any(schema_field.get("name") == candidate for schema_field in fields):
       return candidate
   return None
 
@@ -116,10 +103,10 @@ def _find_vector_field(fields: Sequence[Dict[str, Any]]) -> Optional[str]:
 def _find_vector_dimension(fields: Sequence[Dict[str, Any]], vector_field: Optional[str]) -> Optional[int]:
   if not vector_field:
     return None
-  for field in fields:
-    if field.get("name") != vector_field:
+  for schema_field in fields:
+    if schema_field.get("name") != vector_field:
       continue
-    params = field.get("params") or {}
+    params = schema_field.get("params") or {}
     dim = params.get("dim") or params.get("dimension")
     try:
       return int(dim) if dim is not None else None
@@ -175,26 +162,38 @@ def _hit_to_result(hit: Any, rank: int) -> ImageSearchResult:
   )
 
 
-def _provider_filter(embedding_provider: Optional[str]) -> Optional[str]:
-  if not embedding_provider:
-    return None
-  if not _SAFE_FILTER_VALUE_RE.match(embedding_provider):
-    raise ValueError(
-      "embedding_provider may only contain letters, numbers, '.', '_', ':', '/', or '-'."
-    )
-  return f'embedding_provider == "{embedding_provider}"'
-
-
 def _embedder_provider_id(embedder: BaseMultimodalEmbedder) -> str:
-  """Return the provider identifier persisted by image ingestion."""
+  """Return the provider identifier used by legacy image records."""
   return embedder.__class__.__name__
 
 
-def _combine_filters(*filters: Optional[str]) -> Optional[str]:
-  active = [expr for expr in filters if expr]
-  if not active:
-    return None
-  return " and ".join(f"({expr})" for expr in active)
+def _provider_compatible_results(
+  results: Sequence[ImageSearchResult],
+  embedding_provider: Optional[str],
+) -> List[ImageSearchResult]:
+  """Exclude only records that explicitly identify a different provider.
+
+  Current image records rely on mandatory re-indexing when the configured
+  embedding model changes and may not include provider metadata. Older records
+  can include ``embedding_provider``; those records are checked when present.
+  """
+  if not embedding_provider:
+    return list(results)
+  return [
+    result
+    for result in results
+    if result.embedding_provider in (None, embedding_provider)
+  ]
+
+
+def _validate_search_limits(top_k: int, candidate_k: Optional[int] = None) -> None:
+  if not 1 <= top_k <= MAX_TOP_K:
+    raise ValueError(f"top_k must be between 1 and {MAX_TOP_K}")
+  if candidate_k is not None and not top_k <= candidate_k <= MAX_CANDIDATES:
+    raise ValueError(
+      f"candidate_k must be between top_k and {MAX_CANDIDATES}"
+    )
+
 
 def _get_collection_stats(client: Any, collection_name: str) -> Optional[int]:
   try:
@@ -266,6 +265,7 @@ def search_image(
   search_filter: Optional[str] = None,
 ) -> List[ImageSearchResult]:
   """Embed a local image and search the pre-embedded image collection."""
+  _validate_search_limits(top_k)
   if client is None:
     client = _import_milvus_client()(uri=milvus_uri)
   info = inspect_image_collection(milvus_uri, collection_name, client=client)
@@ -284,20 +284,24 @@ def search_image(
       "query embeddings use the same model."
     )
 
-  milvus_filter = _combine_filters(search_filter, _provider_filter(embedding_provider))
+  retrieval_limit = top_k * 3
   search_kwargs = {
     "collection_name": collection_name,
     "data": [query_embedding],
     "anns_field": info.vector_field,
-    "limit": top_k,
+    "limit": retrieval_limit,
     "output_fields": list(output_fields or DEFAULT_OUTPUT_FIELDS),
   }
-  if milvus_filter:
-    search_kwargs["filter"] = milvus_filter
+  if search_filter:
+    search_kwargs["filter"] = search_filter
 
   raw_results = client.search(**search_kwargs)
   hits: Iterable[Any] = raw_results[0] if raw_results else []
-  return [_hit_to_result(hit, rank=index + 1) for index, hit in enumerate(hits)]
+  candidates = [_hit_to_result(hit, rank=index + 1) for index, hit in enumerate(hits)]
+  compatible = _provider_compatible_results(candidates, embedding_provider)[:top_k]
+  for rank, result in enumerate(compatible, 1):
+    result.rank = rank
+  return compatible
 
 
 def search_text(
@@ -314,6 +318,9 @@ def search_text(
   metadata_weight: float = 0.55,
 ) -> List[ImageSearchResult]:
   """Embed text, retrieve image candidates, and rerank with image metadata."""
+  _validate_search_limits(top_k, candidate_k)
+  if not text.strip():
+    raise ValueError("text query must not be empty")
   if not 0.0 <= metadata_weight <= 1.0:
     raise ValueError("metadata_weight must be between 0 and 1")
   if client is None:
@@ -334,7 +341,6 @@ def search_text(
       "query embeddings use the same model."
     )
 
-  milvus_filter = _combine_filters(search_filter, _provider_filter(embedding_provider))
   retrieval_limit = max(top_k, candidate_k or top_k * 3)
   search_kwargs = {
     "collection_name": collection_name,
@@ -343,12 +349,13 @@ def search_text(
     "limit": retrieval_limit,
     "output_fields": list(output_fields or DEFAULT_OUTPUT_FIELDS),
   }
-  if milvus_filter:
-    search_kwargs["filter"] = milvus_filter
+  if search_filter:
+    search_kwargs["filter"] = search_filter
 
   raw_results = client.search(**search_kwargs)
   hits: Iterable[Any] = raw_results[0] if raw_results else []
   candidates = [_hit_to_result(hit, rank=index + 1) for index, hit in enumerate(hits)]
+  candidates = _provider_compatible_results(candidates, embedding_provider)
   return _rerank_text_results(
     text,
     candidates,
@@ -417,199 +424,4 @@ def _rerank_text_results(
   for rank, result in enumerate(reranked, 1):
     result.rank = rank
   return reranked
-
-
-def _safe_filename(value: Optional[str], fallback: str) -> str:
-  candidate = value or fallback
-  cleaned = _SAFE_FILENAME_RE.sub("_", candidate).strip("._")
-  return cleaned[:120] or fallback
-
-
-def _image_extension(image_url: str, content_type: Optional[str]) -> str:
-  suffix = Path(urlparse(image_url).path).suffix.lower()
-  if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
-    return suffix
-  if content_type:
-    guessed = mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
-    if guessed:
-      return guessed
-  return ".img"
-
-
-def download_image_result(
-  result: ImageSearchResult,
-  download_dir: str | Path,
-  timeout: int = 20,
-  opener=None,
-) -> ImageSearchResult:
-  """Download the retrieved image URL so the match can be inspected locally."""
-  if not result.image_url:
-    result.download_error = "No image_url available on this result."
-    return result
-
-  output_dir = Path(download_dir)
-  output_dir.mkdir(parents=True, exist_ok=True)
-  stem = _safe_filename(result.image_id or Path(urlparse(result.image_url).path).stem, f"image_{result.rank}")
-
-  try:
-    request = Request(result.image_url, headers={"User-Agent": "CAIPE-image-search/1.0"})
-    open_fn = opener or urlopen
-    with open_fn(request, timeout=timeout) as response:
-      payload = response.read()
-      content_type = response.headers.get("Content-Type") if hasattr(response, "headers") else None
-    extension = _image_extension(result.image_url, content_type)
-    output_path = output_dir / f"{result.rank:02d}_{stem}{extension}"
-    output_path.write_bytes(payload)
-    result.downloaded_path = str(output_path)
-    result.download_error = None
-  except (OSError, URLError, ValueError) as exc:
-    result.download_error = str(exc)
-  return result
-
-
-def download_image_results(
-  results: Sequence[ImageSearchResult],
-  download_dir: str | Path,
-  timeout: int = 20,
-  opener=None,
-) -> List[ImageSearchResult]:
-  return [download_image_result(result, download_dir, timeout=timeout, opener=opener) for result in results]
-
-def compute_smoke_metrics(
-  results: Sequence[ImageSearchResult],
-  expected_id: Optional[str] = None,
-  expected_url: Optional[str] = None,
-) -> Dict[str, Any]:
-  """Compute simple smoke-test metrics for a known target image."""
-  metrics: Dict[str, Any] = {
-    "result_count": len(results),
-    "top_score": results[0].score if results else None,
-  }
-  if expected_id or expected_url:
-    match_rank = None
-    for result in results:
-      id_matches = expected_id and result.image_id == expected_id
-      url_matches = expected_url and result.image_url == expected_url
-      if id_matches or url_matches:
-        match_rank = result.rank
-        break
-    metrics["expected_match_found"] = match_rank is not None
-    metrics["expected_match_rank"] = match_rank
-    metrics["expected_match_mrr"] = 1.0 / match_rank if match_rank else 0.0
-  return metrics
-
-
-def _print_collection_info(info: ImageCollectionInfo) -> None:
-  print("Image collection:")
-  for key, value in asdict(info).items():
-    print(f"  {key}: {value}")
-
-
-def _print_results(results: Sequence[ImageSearchResult]) -> None:
-  if not results:
-    print("No image results returned.")
-    return
-  print("Image search results:")
-  for result in results:
-    print(f"  #{result.rank} score={result.score:.4f} id={result.image_id}")
-    print(f"     image_url: {result.image_url}")
-    if result.source_document:
-      print(f"     source_document: {result.source_document}")
-    if result.alt_text:
-      print(f"     alt_text: {result.alt_text}")
-    if result.embedding_provider:
-      print(f"     embedding_provider: {result.embedding_provider}")
-    if result.rerank_score is not None:
-      print(f"     rerank_score: {result.rerank_score:.4f}")
-    if result.metadata_score is not None:
-      print(f"     metadata_score: {result.metadata_score:.4f}")
-    if result.downloaded_path:
-      print(f"     downloaded_path: {result.downloaded_path}")
-    if result.download_error:
-      print(f"     download_error: {result.download_error}")
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-  parser = argparse.ArgumentParser(description="Search CAIPE pre-embedded images with an image or text query")
-  parser.add_argument("--inspect", action="store_true", help="Only inspect the image collection")
-  query_group = parser.add_mutually_exclusive_group()
-  query_group.add_argument("--image", help="Local PNG/JPG/GIF/WebP image to embed and search with")
-  query_group.add_argument("--text", help="Text description to embed and use for image retrieval")
-  parser.add_argument("--top-k", type=int, default=5, help="Number of image results to return")
-  parser.add_argument("--milvus-uri", default=DEFAULT_MILVUS_URI, help="Milvus URI")
-  parser.add_argument("--collection-name", default=DEFAULT_IMAGE_COLLECTION, help="Image collection name")
-  parser.add_argument("--expected-id", help="Optional expected image id for smoke-test metrics")
-  parser.add_argument("--expected-url", help="Optional expected image URL for smoke-test metrics")
-  parser.add_argument("--embedding-provider", help="Only search corpus vectors with this embedding_provider metadata value")
-  parser.add_argument("--filter", help="Optional Milvus filter expression to combine with provider filtering")
-  parser.add_argument("--candidate-k", type=int, help="Candidate count for text-query metadata reranking")
-  parser.add_argument("--metadata-weight", type=float, default=0.55, help="Metadata weight for text-query reranking")
-  parser.add_argument("--download-dir", help="Optional directory for downloaded top-k image results")
-  parser.add_argument("--download-timeout", type=int, default=20, help="Seconds to wait for each image download")
-  parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-  return parser
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-  parser = build_arg_parser()
-  args = parser.parse_args(argv)
-  if not args.inspect and not args.image and not args.text:
-    parser.error("Provide --inspect, --image, or --text")
-
-  info = inspect_image_collection(args.milvus_uri, args.collection_name)
-  if args.inspect and not args.image and not args.text:
-    if args.json:
-      print(json.dumps({"collection": asdict(info)}, indent=2))
-    else:
-      _print_collection_info(info)
-    return 0
-
-  search_kwargs = {
-    "top_k": args.top_k,
-    "milvus_uri": args.milvus_uri,
-    "collection_name": args.collection_name,
-    "embedding_provider": args.embedding_provider,
-    "search_filter": args.filter,
-  }
-  if args.text is not None:
-    results = search_text(
-      text=args.text,
-      candidate_k=args.candidate_k,
-      metadata_weight=args.metadata_weight,
-      **search_kwargs,
-    )
-  else:
-    results = search_image(image_path=args.image, **search_kwargs)
-  if args.download_dir:
-    results = download_image_results(
-      results,
-      args.download_dir,
-      timeout=args.download_timeout,
-    )
-  metrics = compute_smoke_metrics(results, args.expected_id, args.expected_url)
-  if args.json:
-    print(
-      json.dumps(
-        {
-          "collection": asdict(info),
-          "results": [asdict(result) for result in results],
-          "metrics": metrics,
-        },
-        indent=2,
-      )
-    )
-  else:
-    _print_collection_info(info)
-    _print_results(results)
-    print("Smoke metrics:")
-    for key, value in metrics.items():
-      print(f"  {key}: {value}")
-  return 0
-
-
-if __name__ == "__main__":
-  raise SystemExit(main())
-
-
-
 

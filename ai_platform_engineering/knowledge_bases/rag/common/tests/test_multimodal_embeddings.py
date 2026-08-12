@@ -9,7 +9,6 @@ from common.multimodal_embeddings import (
   GeminiMultimodalEmbedder,
   MultimodalEmbeddingsFactory,
   ImageDownloadError,
-  ImageReadError,
   UnsupportedImageFormatError,
   _detect_format,
   _download_image,
@@ -217,13 +216,13 @@ class TestEmbedText:
     embedder = self._make_embedder()
 
     with patch("common.multimodal_embeddings.requests.post", return_value=mock_response) as mock_post:
-      result = embedder.embed_text("NASA logo")
+      result = embedder.embed_text("Example logo")
 
     assert result == fake_embedding
     payload = mock_post.call_args.kwargs["json"]
     assert payload == {
       "model": embedder.model_id,
-      "input": "NASA logo",
+      "input": "Example logo",
       "embeddingPurpose": "IMAGE_RETRIEVAL",
     }
 
