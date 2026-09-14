@@ -831,7 +831,7 @@ class DocumentProcessor:
     # Step 3b: Extract images from documents and store their embeddings
     # (pre-embedding ingestion). Skipped entirely if image_vstore is not configured.
     if self.image_vstore is not None:
-      await self._ingest_images(documents=documents, job_id=job_id)
+      await self._ingest_images(documents=documents, job_id=job_id, datasource_id=datasource_id)
 
     # Step 4: Add structured entities to graph database in one batch
     if all_entities and self.data_graph_db:
@@ -861,9 +861,9 @@ class DocumentProcessor:
     self.logger.info(completion_msg)
     await self.job_manager.upsert_job(job_id=job_id, message=completion_msg)
 
-  async def _ingest_images(self, documents: List[Document], job_id: str) -> None:
+  async def _ingest_images(self, documents: List[Document], job_id: str, datasource_id: str) -> None:
     """Extract image URLs from document metadata, embed and store new ones."""
-    image_docs, image_ids = self._collect_image_candidates(documents)
+    image_docs, image_ids = self._collect_image_candidates(documents, datasource_id)
     if not image_docs:
       return
 
@@ -883,7 +883,7 @@ class DocumentProcessor:
     self.logger.info(f"Successfully embedded {successful}/{len(to_process)} new images ({skipped} already stored)")
     await self.job_manager.upsert_job(job_id=job_id, message=f"[Server] Embedded {successful}/{len(to_process)} images ({skipped} already stored)")
 
-  def _collect_image_candidates(self, documents: List[Document]) -> Tuple[List[Document], List[str]]:
+  def _collect_image_candidates(self, documents: List[Document], datasource_id: str) -> Tuple[List[Document], List[str]]:
     """Extract image URLs from document metadata into (image_doc, deterministic_id) pairs."""
     image_docs: List[Document] = []
     image_ids: List[str] = []
@@ -902,7 +902,7 @@ class DocumentProcessor:
         image_url = image.get("url")
         if not image_url:
           continue
-        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": source_url}))
+        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": source_url, DATASOURCE_ID_KEY: datasource_id}))
         image_ids.append(self._image_id_for_url(image_url))
     return image_docs, image_ids
 

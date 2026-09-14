@@ -12,6 +12,7 @@ from langchain_core.documents import Document
 
 from server.ingestion import DocumentProcessor, MAX_IMAGES_PER_DOCUMENT
 from common.multimodal_embeddings import UnsupportedImageFormatError
+from common.constants import DATASOURCE_ID_KEY
 
 
 def _make_processor(image_vstore=None) -> DocumentProcessor:
@@ -56,7 +57,7 @@ class TestIngestImages:
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=None)
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         image_vstore.aadd_embeddings.assert_not_awaited()
 
@@ -65,7 +66,7 @@ class TestIngestImages:
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=[])
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         image_vstore.aadd_embeddings.assert_not_awaited()
 
@@ -76,7 +77,7 @@ class TestIngestImages:
         image_url = "https://example.com/ant.jpg"
         doc = _make_doc("https://example.com/page", images=[{"url": image_url, "alt_text": "An ant"}])
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         image_vstore.aadd_embeddings.assert_awaited_once()
         call_kwargs = image_vstore.aadd_embeddings.call_args.kwargs
@@ -86,6 +87,19 @@ class TestIngestImages:
         assert call_kwargs["metadatas"][0]["alt_text"] == "An ant"
         assert call_kwargs["metadatas"][0]["source_document"] == "https://example.com/page"
 
+    async def test_ingested_image_is_tagged_with_datasource_id(self):
+        image_vstore = _make_image_vstore()
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2, 0.3])
+        processor = _make_processor(image_vstore=image_vstore)
+        image_url = "https://example.com/diagram.png"
+        doc = _make_doc("https://example.com/page", images=[{"url": image_url, "alt_text": "A diagram"}])
+
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-42")
+
+        image_vstore.aadd_embeddings.assert_awaited_once()
+        call_kwargs = image_vstore.aadd_embeddings.call_args.kwargs
+        assert call_kwargs["metadatas"][0][DATASOURCE_ID_KEY] == "ds-42"
+
     async def test_already_stored_image_is_skipped(self):
         image_url = "https://example.com/ant.jpg"
         existing_id = _image_id(image_url)
@@ -93,7 +107,7 @@ class TestIngestImages:
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=[{"url": image_url, "alt_text": "An ant"}])
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         image_vstore.aadd_embeddings.assert_not_awaited()
 
@@ -111,7 +125,7 @@ class TestIngestImages:
             ],
         )
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         image_vstore.aadd_embeddings.assert_awaited_once()
         call_kwargs = image_vstore.aadd_embeddings.call_args.kwargs
@@ -124,7 +138,7 @@ class TestIngestImages:
         many_images = [{"url": f"https://example.com/img{i}.jpg", "alt_text": ""} for i in range(MAX_IMAGES_PER_DOCUMENT + 10)]
         doc = _make_doc("https://example.com/page", images=many_images)
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         call_kwargs = image_vstore.aadd_embeddings.call_args.kwargs
         assert len(call_kwargs["ids"]) == MAX_IMAGES_PER_DOCUMENT
@@ -138,7 +152,7 @@ class TestIngestImages:
             images=[{"alt_text": "no url here"}, {"url": "https://example.com/valid.jpg", "alt_text": ""}],
         )
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         call_kwargs = image_vstore.aadd_embeddings.call_args.kwargs
         assert len(call_kwargs["ids"]) == 1
@@ -150,7 +164,7 @@ class TestIngestImages:
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=[{"url": "https://example.com/pic.svg", "alt_text": ""}])
 
-        await processor._ingest_images(documents=[doc], job_id="job-1")
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         assert embed_mock.call_count == 1
         image_vstore.aadd_embeddings.assert_not_awaited()
@@ -163,7 +177,7 @@ class TestIngestImages:
         doc = _make_doc("https://example.com/page", images=[{"url": "https://example.com/pic.jpg", "alt_text": ""}])
 
         with patch("server.ingestion.time.sleep"):
-            await processor._ingest_images(documents=[doc], job_id="job-1")
+            await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         assert embed_mock.call_count == 2
         image_vstore.aadd_embeddings.assert_awaited_once()
@@ -176,7 +190,7 @@ class TestIngestImages:
         doc = _make_doc("https://example.com/page", images=[{"url": "https://example.com/pic.jpg", "alt_text": ""}])
 
         with patch("server.ingestion.time.sleep"):
-            await processor._ingest_images(documents=[doc], job_id="job-1")
+            await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
         image_vstore.aadd_embeddings.assert_not_awaited()
 
