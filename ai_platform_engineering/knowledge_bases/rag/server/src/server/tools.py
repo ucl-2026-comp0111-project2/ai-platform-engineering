@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 from typing import Callable, Optional, List, Dict, Any
@@ -10,7 +11,7 @@ from common.models.rbac import UserContext
 import dotenv
 from langchain_core.messages.utils import count_tokens_approximately
 from redis.asyncio import Redis
-from common.constants import KV_ONTOLOGY_VERSION_ID_KEY, PROP_DELIMITER, ONTOLOGY_VERSION_ID_KEY, PRIMARY_ID_KEY
+from common.constants import DATASOURCE_ID_KEY, KV_ONTOLOGY_VERSION_ID_KEY, PROP_DELIMITER, ONTOLOGY_VERSION_ID_KEY, PRIMARY_ID_KEY
 from common.models.rag import valid_metadata_keys, MCPToolConfig, MCPBuiltinToolsConfig, ParallelSearch, StructuredEntity, StructuredEntityId
 import traceback
 from server.query_service import VectorDBQueryService
@@ -27,6 +28,12 @@ logger = get_logger(__name__)
 max_graph_raw_query_results = int(os.getenv("MAX_GRAPH_RAW_QUERY_RESULTS", 100))
 max_graph_raw_query_tokens = int(os.getenv("MAX_GRAPH_RAW_QUERY_TOKENS", 80000))
 search_result_truncate_length = int(os.getenv("SEARCH_RESULT_TRUNCATE_LENGTH", 500))
+
+
+def _image_datasource_filter(datasource_ids: List[str]) -> str:
+  """Build a safely quoted Milvus filter for image datasource IDs."""
+  values = ", ".join(json.dumps(datasource_id) for datasource_id in datasource_ids)
+  return f"{DATASOURCE_ID_KEY} in [{values}]"
 
 
 class AgentTools:
@@ -134,17 +141,51 @@ class AgentTools:
 
     logger.info(f"Registered MCP tools: {[t.name for t in await mcp.list_tools()]}")
 
-  async def search_images(self, query: str, limit: int = 5) -> Dict[str, Any]:
+  async def search_images(
+    self,
+    query: str,
+    limit: int = 5,
+    datasource_id: Optional[str] = None,
+  ) -> Dict[str, Any]:
     """Search pre-embedded Knowledge Base images from a text description.
 
     Use this tool when the user asks to find, show, or retrieve images. It
     returns ranked image URLs and source metadata that the CAIPE UI can render.
+    When datasource_id is supplied, results are restricted to that datasource.
     """
     bounded_limit = max(1, min(limit, 5))
-    results = await asyncio.to_thread(search_text, text=query, top_k=bounded_limit)
+    requested_datasource_id = datasource_id.strip() if datasource_id else None
+    accessible_datasource_ids = await self._resolve_accessible_datasource_ids("read")
+
+    if requested_datasource_id:
+      if (
+        accessible_datasource_ids is not None
+        and requested_datasource_id not in accessible_datasource_ids
+      ):
+        datasource_ids: Optional[List[str]] = []
+      else:
+        datasource_ids = [requested_datasource_id]
+    else:
+      datasource_ids = accessible_datasource_ids
+
+    if datasource_ids == []:
+      results = []
+    else:
+      search_filter = (
+        _image_datasource_filter(datasource_ids)
+        if datasource_ids is not None
+        else None
+      )
+      results = await asyncio.to_thread(
+        search_text,
+        text=query,
+        top_k=bounded_limit,
+        search_filter=search_filter,
+      )
     return {
       "type": "knowledge_base_image_results",
       "query": query,
+      "datasource_id": requested_datasource_id,
       "results": [
         {
           "rank": result.rank,
@@ -153,6 +194,7 @@ class AgentTools:
           "image_url": result.image_url,
           "source_document": result.source_document,
           "alt_text": result.alt_text,
+          "datasource_id": result.datasource_id,
           "rerank_score": result.rerank_score,
         }
         for result in results

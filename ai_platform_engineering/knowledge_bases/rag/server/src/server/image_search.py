@@ -8,18 +8,22 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from urllib.parse import urlparse
 
+from common.constants import DATASOURCE_ID_KEY
 from common.multimodal_embeddings import BaseMultimodalEmbedder, MultimodalEmbeddingsFactory
 
 DEFAULT_IMAGE_COLLECTION = os.getenv("IMAGE_COLLECTION_NAME", "rag_images")
 DEFAULT_MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
 MAX_TOP_K = 100
 MAX_CANDIDATES = 300
+DEFAULT_TEXT_CANDIDATES = 100
+DEFAULT_METADATA_WEIGHT = 0.85
 DEFAULT_OUTPUT_FIELDS = [
   "text",
   "pk",
   "source_document",
   "alt_text",
   "embedding_provider",
+  DATASOURCE_ID_KEY,
 ]
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _QUERY_STOP_WORDS = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}
@@ -51,6 +55,7 @@ class ImageSearchResult:
   source_document: Optional[str] = None
   alt_text: Optional[str] = None
   embedding_provider: Optional[str] = None
+  datasource_id: Optional[str] = None
   rerank_score: Optional[float] = None
   metadata_score: Optional[float] = None
   metadata: Dict[str, Any] = field(default_factory=dict)
@@ -124,7 +129,7 @@ def _entity_to_dict(entity: Any) -> Dict[str, Any]:
     value = entity.to_dict()
     return value if isinstance(value, dict) else {}
   result: Dict[str, Any] = {}
-  for key in ("text", "pk", "id", "source", "source_document", "alt_text", "embedding_provider", "metadata"):
+  for key in ("text", "pk", "id", "source", "source_document", "alt_text", "embedding_provider", DATASOURCE_ID_KEY, "metadata"):
     if hasattr(entity, key):
       result[key] = getattr(entity, key)
   return result
@@ -149,6 +154,7 @@ def _hit_to_result(hit: Any, rank: int) -> ImageSearchResult:
     or entity.get("page_content")
   )
   embedding_provider = entity.get("embedding_provider") or nested_metadata.get("embedding_provider")
+  datasource_id = entity.get(DATASOURCE_ID_KEY) or nested_metadata.get(DATASOURCE_ID_KEY)
 
   return ImageSearchResult(
     rank=rank,
@@ -158,6 +164,7 @@ def _hit_to_result(hit: Any, rank: int) -> ImageSearchResult:
     source_document=entity.get("source_document") or entity.get("source"),
     alt_text=entity.get("alt_text"),
     embedding_provider=str(embedding_provider) if embedding_provider is not None else None,
+    datasource_id=str(datasource_id) if datasource_id is not None else None,
     metadata=metadata,
   )
 
@@ -315,7 +322,7 @@ def search_text(
   embedding_provider: Optional[str] = None,
   search_filter: Optional[str] = None,
   candidate_k: Optional[int] = None,
-  metadata_weight: float = 0.55,
+  metadata_weight: float = DEFAULT_METADATA_WEIGHT,
 ) -> List[ImageSearchResult]:
   """Embed text, retrieve image candidates, and rerank with image metadata."""
   _validate_search_limits(top_k, candidate_k)
@@ -341,7 +348,7 @@ def search_text(
       "query embeddings use the same model."
     )
 
-  retrieval_limit = max(top_k, candidate_k or top_k * 3)
+  retrieval_limit = max(top_k, candidate_k or DEFAULT_TEXT_CANDIDATES)
   search_kwargs = {
     "collection_name": collection_name,
     "data": [query_embedding],
@@ -365,18 +372,37 @@ def search_text(
   )
 
 
+def _normalise_token(token: str) -> str:
+  """Normalise common English plural forms for metadata matching."""
+  if len(token) > 4 and token.endswith("ies"):
+    return token[:-3] + "y"
+  if len(token) > 4 and token.endswith("es") and token[-3] in "sxz":
+    return token[:-2]
+  if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+    return token[:-1]
+  return token
+
+
+def _normalised_tokens(text: str) -> set[str]:
+  return {
+    _normalise_token(token)
+    for token in _TOKEN_RE.findall(text.lower())
+    if token not in _QUERY_STOP_WORDS
+  }
+
+
 def _query_tokens(text: str) -> set[str]:
-  tokens = {token for token in _TOKEN_RE.findall(text.lower()) if token not in _QUERY_STOP_WORDS}
+  tokens = _normalised_tokens(text)
   expanded = set(tokens)
   for token in tokens:
-    expanded.update(_QUERY_SYNONYMS.get(token, set()))
+    expanded.update(_normalise_token(value) for value in _QUERY_SYNONYMS.get(token, set()))
   return expanded
 
 
 def _token_coverage(query_tokens: set[str], value: Optional[str]) -> float:
   if not query_tokens or not value:
     return 0.0
-  value_tokens = set(_TOKEN_RE.findall(value.lower()))
+  value_tokens = _normalised_tokens(value)
   # Metadata fields are short. Cap the denominator so one or two strong
   # filename/alt-text matches are not diluted by a long descriptive query.
   return min(1.0, len(query_tokens & value_tokens) / min(4, len(query_tokens)))
