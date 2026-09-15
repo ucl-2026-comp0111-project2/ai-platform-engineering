@@ -156,8 +156,8 @@ In addition to text content, the Webloader extracts `<img>` tags found on
 each crawled page, capturing each image's URL (resolved to an absolute URL)
 and alt text. These are carried through ingestion as document metadata and,
 when the RAG server is configured with an image vector store, embedded at
-ingestion time (pre-embedding) using Amazon's Nova 2 Multimodal Embeddings
-model 
+ingestion time (pre-embedding). Gemini Embedding 2 is the default multimodal
+provider; Amazon Nova 2 Multimodal Embeddings can be selected explicitly.
 
 This is independent of the webloader's own environment variables; it is
 configured on the RAG server side. See `common/multimodal_embeddings.py`
@@ -165,14 +165,16 @@ for details. :
 
 - `LITELLM_API_BASE` - Base URL of the LiteLLM proxy
 - `LITELLM_API_KEY` - API key for the LiteLLM proxy
+- `MULTIMODAL_EMBEDDINGS_PROVIDER` - Optional `gemini` or `nova` override
 
-If these are not set, image embedding is skipped and only the image URL/alt
-text metadata is preserved (no failure).
+Image extraction remains part of the crawled document metadata. To embed and
+search those images, set `ENABLE_IMAGE_EMBEDDING=true` on the RAG server and
+provide the LiteLLM settings above; the feature is disabled by default.
 
-Images are stored in a separate Milvus collection, `rag_images`, keyed by
-`img_{md5(image_url)[:12]}` (re-crawling updates existing records rather
-than duplicating). Fields: `text` (image URL), `vector` (3072-dim
-embedding), `alt_text`, `source_document`.
+Images are stored in a separate Milvus collection, `rag_images`, keyed by a
+stable hash of the datasource ID and image URL (re-crawling the same image in
+the same datasource does not duplicate it). Stored metadata includes the image
+URL, alternative text, source document, embedding provider and datasource ID.
 
 ## Running with Docker Compose
 

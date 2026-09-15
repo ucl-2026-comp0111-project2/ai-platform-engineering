@@ -64,8 +64,10 @@ records that rely on collection-level re-indexing.
 | `LITELLM_API_KEY` | API key used by the embeddings proxy. |
 | `MILVUS_URI` | Milvus endpoint. Defaults to `http://localhost:19530`. |
 | `IMAGE_COLLECTION_NAME` | Image collection name. Defaults to `rag_images`. |
-| `ENABLE_IMAGE_EMBEDDING` | Enables image ingestion and the `search_images` MCP tool. |
+| `ENABLE_IMAGE_EMBEDDING` | Enables image ingestion and the `search_images` MCP tool. Disabled by default. |
 | `MULTIMODAL_EMBEDDINGS_PROVIDER` | Optional explicit multimodal provider selection. |
+| `MAX_IMAGE_DOWNLOAD_BYTES` | Maximum downloaded image size; defaults to 10 MiB. |
+| `ALLOW_NON_PUBLIC_IMAGE_URLS` | Allows image downloads from internal/private addresses. Disabled by default; enable only for trusted internal datasources. |
 
 ## MCP response
 
@@ -79,6 +81,11 @@ bounded list of results. Each result can include:
 - alternative text.
 
 The UI validates the response shape and URL scheme before rendering a gallery.
+
+To enable the end-to-end feature, set `ENABLE_IMAGE_EMBEDDING=true` on the RAG
+server and configure an embeddings proxy with access to the selected multimodal
+model. Keeping the feature opt-in preserves startup compatibility for existing
+deployments that do not configure multimodal credentials.
 
 ## Limitations
 

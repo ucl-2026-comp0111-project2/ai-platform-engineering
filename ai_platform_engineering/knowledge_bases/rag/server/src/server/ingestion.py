@@ -887,11 +887,21 @@ class DocumentProcessor:
     """Extract image URLs from document metadata into (image_doc, deterministic_id) pairs."""
     image_docs: List[Document] = []
     image_ids: List[str] = []
+    seen_image_ids: set[str] = set()
+    embedder = getattr(getattr(self.image_vstore, "embeddings", None), "embedder", None)
+    embedding_provider = embedder.__class__.__name__ if embedder is not None else None
     for doc in documents:
       nested_metadata = doc.metadata.get("metadata") or {}
       images = nested_metadata.get("images") or []
       if isinstance(images, str):
-        images = json.loads(images)
+        try:
+          images = json.loads(images)
+        except json.JSONDecodeError as exc:
+          self.logger.warning(f"Skipping malformed image metadata: {exc}")
+          continue
+      if not isinstance(images, list):
+        self.logger.warning("Skipping image metadata because it is not a list")
+        continue
       source_url = nested_metadata.get("source", "")
 
       if len(images) > MAX_IMAGES_PER_DOCUMENT:
@@ -899,17 +909,36 @@ class DocumentProcessor:
         images = images[:MAX_IMAGES_PER_DOCUMENT]
 
       for image in images:
+        if not isinstance(image, dict):
+          continue
         image_url = image.get("url")
         if not image_url:
           continue
-        image_docs.append(Document(page_content=image_url, metadata={"alt_text": image.get("alt_text", ""), "source_document": source_url, DATASOURCE_ID_KEY: datasource_id}))
-        image_ids.append(self._image_id_for_url(image_url))
+        image_id = self._image_id_for_url(image_url, datasource_id)
+        if image_id in seen_image_ids:
+          continue
+        seen_image_ids.add(image_id)
+        image_metadata = {
+          "alt_text": image.get("alt_text", ""),
+          "source_document": source_url,
+          DATASOURCE_ID_KEY: datasource_id,
+        }
+        if embedding_provider:
+          image_metadata["embedding_provider"] = embedding_provider
+        image_docs.append(Document(page_content=image_url, metadata=image_metadata))
+        image_ids.append(image_id)
     return image_docs, image_ids
 
   @staticmethod
-  def _image_id_for_url(image_url: str) -> str:
-    """Deterministic id so re-embedding the same URL updates rather than duplicates."""
-    url_hash = hashlib.md5(image_url.encode()).hexdigest()[:12]
+  def _image_id_for_url(image_url: str, datasource_id: str) -> str:
+    """Return a stable ID for an image within one datasource.
+
+    Including the datasource avoids one datasource's copy of a shared image URL
+    suppressing or overwriting another datasource's record. It also lets a reload
+    migrate legacy URL-only records by creating a correctly scoped row.
+    """
+    scoped_value = f"{datasource_id}\0{image_url}"
+    url_hash = hashlib.md5(scoped_value.encode()).hexdigest()[:12]
     return f"img_{url_hash}"
 
   async def _get_existing_image_ids(self, image_ids: List[str]) -> set:

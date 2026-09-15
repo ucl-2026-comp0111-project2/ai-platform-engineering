@@ -544,6 +544,133 @@ function ContentSegmentView({
 // Tool Segment
 // ═══════════════════════════════════════════════════════════════
 
+const MAX_IMAGE_SEARCH_RESULTS = 5;
+
+type ImageSearchResult = {
+  rank: number;
+  image_url?: string | null;
+  source_document?: string | null;
+  alt_text?: string | null;
+};
+
+function isImageSearchResult(value: unknown): value is ImageSearchResult {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.rank === "number" &&
+    Number.isInteger(item.rank) &&
+    item.rank > 0 &&
+    (item.image_url == null || typeof item.image_url === "string") &&
+    (item.source_document == null || typeof item.source_document === "string") &&
+    (item.alt_text == null || typeof item.alt_text === "string")
+  );
+}
+
+function safeHttpUrl(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") &&
+      !url.username &&
+      !url.password
+      ? url.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseImageSearchResults(tool: ToolInfo): ImageSearchResult[] | null {
+  if (!tool.name.endsWith("search_images") || !tool.result) return null;
+  try {
+    const payload = JSON.parse(tool.result) as {
+      type?: string;
+      results?: unknown[];
+    };
+    return payload.type === "knowledge_base_image_results" &&
+      Array.isArray(payload.results)
+      ? payload.results
+          .filter(isImageSearchResult)
+          .slice(0, MAX_IMAGE_SEARCH_RESULTS)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function ToolResultView({ tool, isNested }: { tool: ToolInfo; isNested: boolean }) {
+  const images = parseImageSearchResults(tool);
+  if (!images) {
+    return (
+      <p className={cn(
+        "text-muted-foreground/70 font-mono leading-snug whitespace-pre-wrap break-all line-clamp-6 mt-0.5",
+        isNested ? "text-[8px]" : "text-[10px]"
+      )}>
+        {tool.result}
+      </p>
+    );
+  }
+
+  if (images.length === 0) {
+    return <p className="mt-1 text-muted-foreground">No matching images found.</p>;
+  }
+
+  return (
+    <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+      {images.map((image) => {
+        const imageUrl = safeHttpUrl(image.image_url);
+        const targetUrl = imageUrl ?? safeHttpUrl(image.source_document);
+        const key = `${image.rank}-${image.image_url ?? image.source_document}`;
+        const card = (
+          <>
+            {imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                alt={image.alt_text || `Image result ${image.rank}`}
+                className="aspect-square w-full bg-white object-contain"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                src={imageUrl}
+              />
+            ) : (
+              <div className="flex aspect-square items-center justify-center p-2 text-center text-muted-foreground">
+                Image unavailable
+              </div>
+            )}
+            <div className="p-1.5 text-[10px]">
+              <div className="font-medium">#{image.rank}</div>
+              <div className="truncate text-muted-foreground">
+                {image.alt_text || image.source_document || "Retrieved image"}
+              </div>
+            </div>
+          </>
+        );
+
+        return targetUrl ? (
+          <a
+            className="group overflow-hidden rounded-md border border-foreground/10 bg-background"
+            href={targetUrl}
+            key={key}
+            rel="noreferrer"
+            target="_blank"
+            title={image.alt_text || `Image result ${image.rank}`}
+          >
+            {card}
+          </a>
+        ) : (
+          <div
+            className="overflow-hidden rounded-md border border-foreground/10 bg-background"
+            key={key}
+            title={image.alt_text || `Image result ${image.rank}`}
+          >
+            {card}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ToolSegmentView({ segment, isNested = false }: { segment: ToolSegment; isNested?: boolean }) {
   const { data: tool } = segment;
   const thought = extractToolThought(tool.args);
@@ -552,7 +679,10 @@ function ToolSegmentView({ segment, isNested = false }: { segment: ToolSegment; 
   const errorDisplay = isFailed && tool.error ? formatToolError(tool.error) : null;
   const hasParams = tool.args && Object.keys(tool.args).length > 0;
   const hasDetails = hasParams || (!isFailed && tool.result);
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const hasImageResults = Boolean(parseImageSearchResults(tool));
+  const [detailsOpen, setDetailsOpen] = useState(hasImageResults);
+  const [detailsToggled, setDetailsToggled] = useState(false);
+  const visibleDetailsOpen = detailsToggled ? detailsOpen : detailsOpen || hasImageResults;
 
   return (
     <div
@@ -567,7 +697,10 @@ function ToolSegmentView({ segment, isNested = false }: { segment: ToolSegment; 
       {/* Header row with tool name, thought, and status — clickable to toggle details */}
       <div
         className={cn("flex items-center gap-1.5 rounded-sm transition-colors", hasDetails && "hover:bg-foreground/5 cursor-pointer")}
-        onClick={hasDetails ? () => setDetailsOpen(!detailsOpen) : undefined}
+        onClick={hasDetails ? () => {
+          setDetailsToggled(true);
+          setDetailsOpen(!visibleDetailsOpen);
+        } : undefined}
       >
         {isRunning ? (
           <Loader2 className={cn("animate-spin text-amber-500 shrink-0", isNested ? "h-2.5 w-2.5" : "h-3 w-3")} />
@@ -588,7 +721,7 @@ function ToolSegmentView({ segment, isNested = false }: { segment: ToolSegment; 
         {hasDetails && (
           <ChevronDown className={cn(
             "text-muted-foreground/50 transition-transform duration-150 shrink-0",
-            detailsOpen && "rotate-180",
+            visibleDetailsOpen && "rotate-180",
             isNested ? "h-2.5 w-2.5" : "h-3 w-3"
           )} />
         )}
@@ -617,7 +750,7 @@ function ToolSegmentView({ segment, isNested = false }: { segment: ToolSegment; 
       {hasDetails && (
         <div className={cn(
           "grid transition-all duration-150 ease-out",
-          detailsOpen ? "grid-rows-[1fr] mt-1.5" : "grid-rows-[0fr]"
+          visibleDetailsOpen ? "grid-rows-[1fr] mt-1.5" : "grid-rows-[0fr]"
         )}>
           <div className="overflow-hidden">
             <div>
@@ -643,12 +776,7 @@ function ToolSegmentView({ segment, isNested = false }: { segment: ToolSegment; 
                   "text-muted-foreground/50 font-medium",
                   isNested ? "text-[8px]" : "text-[10px]"
                 )}>output:</span>
-                <p className={cn(
-                  "text-muted-foreground/70 font-mono leading-snug whitespace-pre-wrap break-all line-clamp-6 mt-0.5",
-                  isNested ? "text-[8px]" : "text-[10px]"
-                )}>
-                  {tool.result}
-                </p>
+                <ToolResultView tool={tool} isNested={isNested} />
               </div>
             )}
           </div>
@@ -771,7 +899,10 @@ function ToolItemView({ tool, isNested = false }: { tool: ToolInfo; isNested?: b
   const errorDisplay = isFailed && tool.error ? formatToolError(tool.error) : null;
   const hasParams = tool.args && Object.keys(tool.args).length > 0;
   const hasDetails = hasParams || (!isFailed && tool.result);
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const hasImageResults = Boolean(parseImageSearchResults(tool));
+  const [detailsOpen, setDetailsOpen] = useState(hasImageResults);
+  const [detailsToggled, setDetailsToggled] = useState(false);
+  const visibleDetailsOpen = detailsToggled ? detailsOpen : detailsOpen || hasImageResults;
 
   return (
     <div
@@ -786,7 +917,10 @@ function ToolItemView({ tool, isNested = false }: { tool: ToolInfo; isNested?: b
       {/* Header row with tool name, thought, and status — clickable to toggle details */}
       <div
         className={cn("flex items-center gap-2 rounded-sm transition-colors", hasDetails && "hover:bg-foreground/5 cursor-pointer")}
-        onClick={hasDetails ? () => setDetailsOpen(!detailsOpen) : undefined}
+        onClick={hasDetails ? () => {
+          setDetailsToggled(true);
+          setDetailsOpen(!visibleDetailsOpen);
+        } : undefined}
       >
         {isRunning ? (
           <Loader2 className={cn("animate-spin text-amber-500 shrink-0", isNested ? "h-2.5 w-2.5" : "h-3 w-3")} />
@@ -807,7 +941,7 @@ function ToolItemView({ tool, isNested = false }: { tool: ToolInfo; isNested?: b
         {hasDetails && (
           <ChevronDown className={cn(
             "text-muted-foreground/50 transition-transform duration-150 shrink-0",
-            detailsOpen && "rotate-180",
+            visibleDetailsOpen && "rotate-180",
             isNested ? "h-2.5 w-2.5" : "h-3 w-3"
           )} />
         )}
@@ -836,7 +970,7 @@ function ToolItemView({ tool, isNested = false }: { tool: ToolInfo; isNested?: b
       {hasDetails && (
         <div className={cn(
           "grid transition-all duration-150 ease-out",
-          detailsOpen ? "grid-rows-[1fr] mt-1.5" : "grid-rows-[0fr]"
+          visibleDetailsOpen ? "grid-rows-[1fr] mt-1.5" : "grid-rows-[0fr]"
         )}>
           <div className="overflow-hidden">
             <div>
@@ -862,12 +996,7 @@ function ToolItemView({ tool, isNested = false }: { tool: ToolInfo; isNested?: b
                   "text-muted-foreground/50 font-medium",
                   isNested ? "text-[8px]" : "text-[10px]"
                 )}>output:</span>
-                <p className={cn(
-                  "text-muted-foreground/70 font-mono leading-snug whitespace-pre-wrap break-all line-clamp-6 mt-0.5",
-                  isNested ? "text-[8px]" : "text-[10px]"
-                )}>
-                  {tool.result}
-                </p>
+                <ToolResultView tool={tool} isNested={isNested} />
               </div>
             )}
           </div>

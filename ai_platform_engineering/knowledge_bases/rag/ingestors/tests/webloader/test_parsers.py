@@ -179,6 +179,28 @@ class TestContentExtraction:
     # Should not include navigation
     assert "Navigation" not in result.content or result.content.count("Navigation") == 0
 
+  def test_generic_extracts_images_and_resolves_relative_urls(self):
+    """Generic parsing should preserve usable image URLs and alt text."""
+    from ingestors.webloader.loader.parsers.generic import GenericParser
+
+    response = make_response(
+      """
+      <html><body><main>
+        <p>Enough page content for parsing.</p>
+        <img src="/assets/diagram.png" alt="Example diagram">
+        <img alt="Missing source">
+      </main></body></html>
+      """,
+      url="https://example.com/docs/page",
+    )
+
+    result = GenericParser.extract(response)
+
+    assert result.images == [{
+      "url": "https://example.com/assets/diagram.png",
+      "alt_text": "Example diagram",
+    }]
+
   def test_generic_extracts_main_content(self):
     """Generic parser should extract content from main tag."""
     from ingestors.webloader.loader.parsers.generic import GenericParser

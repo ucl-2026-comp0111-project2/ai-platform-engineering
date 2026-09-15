@@ -5,6 +5,8 @@ These tests verify that the pipeline correctly converts ScrapedPageItem
 objects to LangChain Documents and handles validation.
 """
 
+import json
+
 import pytest
 from unittest.mock import Mock, AsyncMock
 
@@ -35,6 +37,7 @@ def make_scraped_item(
   description: str = "A test page description",
   language: str = "en",
   generator: str = None,
+  images=None,
 ):
   """Create a ScrapedPageItem for testing."""
   from ingestors.webloader.loader.items import ScrapedPageItem
@@ -46,6 +49,7 @@ def make_scraped_item(
     description=description,
     language=language,
     generator=generator,
+    images=images or [],
   )
 
 
@@ -128,6 +132,20 @@ class TestItemProcessing:
     await pipeline.process_item(item, spider)
 
     spider.job_manager.increment_progress.assert_called_once_with("test-job-789")
+
+  @pytest.mark.asyncio
+  async def test_process_item_preserves_images_in_document_metadata(self):
+    """Extracted images should reach the RAG server in its accepted JSON form."""
+    from ingestors.webloader.loader.pipelines.document import DocumentPipeline
+
+    pipeline = DocumentPipeline()
+    spider = make_mock_spider()
+    pipeline.open_spider(spider)
+    images = [{"url": "https://example.com/diagram.png", "alt_text": "Example diagram"}]
+
+    await pipeline.process_item(make_scraped_item(images=images), spider)
+
+    assert json.loads(pipeline.batch[0].metadata["metadata"]["images"]) == images
 
   @pytest.mark.asyncio
   async def test_drops_item_with_no_content(self):

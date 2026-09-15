@@ -5,23 +5,40 @@ import base64
 import os
 from pathlib import Path
 from typing import List, Optional, Union
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
 from langchain_core.embeddings import Embeddings
 
-from common.utils import get_logger
+from common.utils import get_logger, sanitize_url
 
 logger = get_logger(__name__)
 
 SUPPORTED_IMAGE_FORMATS = {"jpg", "jpeg", "png", "gif", "webp"}
+DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_REDIRECTS = 5
 
 # Model registry: provider name -> (model id on the embeddings proxy, output dimension)
 _PROVIDER_REGISTRY = {
   "nova": (os.getenv("NOVA_MULTIMODAL_MODEL_ID", "bedrock/amazon.nova-2-multimodal-embeddings-v1:0"), 3072),
   "gemini": (os.getenv("GEMINI_MULTIMODAL_MODEL_ID", "vertex_ai/gemini-embedding-2"), 3072),
 }
+
+
+def _safe_source_label(source: str) -> str:
+  """Remove credentials, query parameters, and fragments from logged URLs."""
+  parsed = urlparse(source)
+  if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    return source
+  host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+  try:
+    port = parsed.port
+  except ValueError:
+    port = None
+  if port:
+    host = f"{host}:{port}"
+  return parsed._replace(netloc=host, query="", fragment="").geturl()
 
 
 class ImageDownloadError(Exception):
@@ -43,18 +60,68 @@ def _detect_format(url: str) -> str:
   path = urlparse(url).path
   extension = path.rsplit(".", 1)[-1].lower() if "." in path else ""
   if extension not in SUPPORTED_IMAGE_FORMATS:
-    raise UnsupportedImageFormatError(f"Unsupported or missing image format for URL: {url} (extension: '{extension}'). Supported: {sorted(SUPPORTED_IMAGE_FORMATS)}")
+    raise UnsupportedImageFormatError(f"Unsupported or missing image format for URL: {_safe_source_label(url)} (extension: '{extension}'). Supported: {sorted(SUPPORTED_IMAGE_FORMATS)}")
   return "jpeg" if extension == "jpg" else extension
 
 
+def _validate_image_url(url: str) -> str:
+  """Validate an image URL before each outbound request."""
+  parsed = urlparse(url)
+  if parsed.username is not None or parsed.password is not None:
+    raise ValueError("embedded URL credentials are not allowed")
+  allow_non_public = os.getenv("ALLOW_NON_PUBLIC_IMAGE_URLS", "false").lower() == "true"
+  return sanitize_url(url, allow_non_public_urls=allow_non_public)
+
+
 def _download_image(url: str, timeout: int = 15) -> bytes:
-  """Download raw image bytes from a URL."""
+  """Download bounded image bytes while validating every redirect target."""
+  max_bytes = int(os.getenv("MAX_IMAGE_DOWNLOAD_BYTES", str(DEFAULT_MAX_IMAGE_DOWNLOAD_BYTES)))
+  current_url = url
   try:
-    response = requests.get(url, timeout=timeout, headers={"User-Agent": "CAIPE-Ingestor/1.0"})
-    response.raise_for_status()
-    return response.content
+    for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
+      current_url = _validate_image_url(current_url)
+      response = requests.get(
+        current_url,
+        timeout=timeout,
+        headers={"User-Agent": "CAIPE-Ingestor/1.0"},
+        allow_redirects=False,
+        stream=True,
+      )
+      try:
+        if response.status_code in {301, 302, 303, 307, 308}:
+          location = response.headers.get("Location")
+          if not location:
+            raise ImageDownloadError(f"Image redirect from {_safe_source_label(current_url)} did not include a Location header")
+          if redirect_count == MAX_IMAGE_REDIRECTS:
+            raise ImageDownloadError(f"Image download exceeded {MAX_IMAGE_REDIRECTS} redirects")
+          current_url = urljoin(current_url, location)
+          continue
+
+        response.raise_for_status()
+        declared_length = response.headers.get("Content-Length")
+        if declared_length is not None and int(declared_length) > max_bytes:
+          raise ImageDownloadError(f"Image exceeds the {max_bytes} byte download limit")
+
+        chunks = []
+        downloaded = 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+          if not chunk:
+            continue
+          downloaded += len(chunk)
+          if downloaded > max_bytes:
+            raise ImageDownloadError(f"Image exceeds the {max_bytes} byte download limit")
+          chunks.append(chunk)
+        return b"".join(chunks)
+      finally:
+        response.close()
+  except ImageDownloadError:
+    raise
   except requests.RequestException as e:
-    raise ImageDownloadError(f"Failed to download image from {url}: {e}") from e
+    raise ImageDownloadError(f"Failed to download image from {_safe_source_label(url)}: {type(e).__name__}") from e
+  except (ValueError, OSError) as e:
+    raise ImageDownloadError(f"Failed to download image from {_safe_source_label(url)}: {e}") from e
+
+  raise ImageDownloadError(f"Failed to download image from {_safe_source_label(url)}")
 
 
 class BaseMultimodalEmbedder:
@@ -92,12 +159,12 @@ class BaseMultimodalEmbedder:
       )
       response.raise_for_status()
       embedding = response.json()["data"][0]["embedding"]
-      logger.info(f"Embedded image via {self.provider_name}: source={source}, dimension={len(embedding)}")
+      logger.info(f"Embedded image via {self.provider_name}: source={_safe_source_label(source)}, dimension={len(embedding)}")
       return embedding
     except requests.RequestException as e:
-      raise RuntimeError(f"Embeddings proxy request failed for image {source}: {e}") from e
+      raise RuntimeError(f"Embeddings proxy request failed for image {_safe_source_label(source)}: {type(e).__name__}") from e
     except (KeyError, IndexError) as e:
-      raise RuntimeError(f"Unexpected response format from {self.provider_name} for {source}: {e}") from e
+      raise RuntimeError(f"Unexpected response format from {self.provider_name} for {_safe_source_label(source)}: {type(e).__name__}") from e
 
   def embed_image_url(self, url: str) -> List[float]:
     """Download an image and return its embedding vector."""
@@ -180,17 +247,18 @@ class MultimodalEmbeddingsFactory:
         raise ValueError(f"Unsupported multimodal embeddings provider: '{provider}'. Supported: {sorted(cls._EMBEDDERS)}")
       return provider
 
-        # No explicit override: follow the text embedding model, when possible.
+    # No explicit override: follow the text embedding model, when possible.
     from common.embeddings_factory import EmbeddingsFactory
     text_identifier = EmbeddingsFactory.get_provider_identifier().lower()
     for provider_name in cls._EMBEDDERS:
       if provider_name in text_identifier:
         return provider_name
 
-    # Text model has no image-capable equivalent . Default to
+    # Text model has no image-capable equivalent. Default to
     # gemini rather than block startup; incompatible embed attempts fail
     # individually and get logged, same as any other embed failure.
     return "gemini"
+
   @classmethod
   def get_embedder(cls) -> BaseMultimodalEmbedder:
     return cls._EMBEDDERS[cls._get_provider_name()]()

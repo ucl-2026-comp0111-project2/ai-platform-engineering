@@ -5,9 +5,9 @@ This pipeline batches scraped pages and sends them to the RAG server
 for embedding and storage.
 """
 
+import json
 import time
 from typing import List
-
 
 from scrapy import Spider
 from scrapy.exceptions import DropItem
@@ -102,6 +102,9 @@ class DocumentPipeline:
         "source": item.url,
         "language": item.language or "",
         "generator": item.generator or "",
+        # Keep nested image objects JSON-encoded for Milvus dynamic-field
+        # compatibility. The RAG server accepts this serialized form.
+        "images": json.dumps(item.images) if item.images else "",
         **item.extra_metadata,
       },
     )

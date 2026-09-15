@@ -549,6 +549,7 @@ dependencies = [
     { name = "neo4j" },
     { name = "pydantic" },
     { name = "redis" },
+    { name = "requests" },
 ]
 
 [package.optional-dependencies]
@@ -567,6 +568,7 @@ requires-dist = [
     { name = "neo4j", specifier = "==5.28.2" },
     { name = "pydantic", specifier = "==2.11.9" },
     { name = "redis", specifier = "==6.4.0" },
+    { name = "requests", specifier = "==2.33.1" },
 ]
 provides-extras = ["huggingface"]
 

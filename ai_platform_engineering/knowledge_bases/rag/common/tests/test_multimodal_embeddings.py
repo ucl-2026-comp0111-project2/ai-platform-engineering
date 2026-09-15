@@ -1,5 +1,6 @@
 """Tests for multimodal_embeddings.py (Nova, Gemini embedders and the provider factory)."""
 import os
+import socket
 import pytest
 import requests
 from unittest.mock import patch, MagicMock
@@ -12,6 +13,7 @@ from common.multimodal_embeddings import (
   UnsupportedImageFormatError,
   _detect_format,
   _download_image,
+  _safe_source_label,
 )
 
 
@@ -67,12 +69,27 @@ class TestDetectFormat:
       _detect_format("https://example.com/document.pdf")
 
 
+def test_safe_source_label_removes_url_secrets_but_preserves_local_paths():
+  assert _safe_source_label("https://user:secret@example.com:8443/image.jpg?token=secret#part") == "https://example.com:8443/image.jpg"
+  assert _safe_source_label("C:/images/query.png") == "C:/images/query.png"
+
+
 class TestDownloadImage:
   """Module-level download, shared by all providers."""
 
-  def test_successful_download_returns_bytes(self):
+  @staticmethod
+  def _allow_public_dns(monkeypatch):
+    monkeypatch.setattr(
+      "common.utils.socket.getaddrinfo",
+      lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+
+  def test_successful_download_returns_bytes(self, monkeypatch):
+    self._allow_public_dns(monkeypatch)
     mock_response = MagicMock()
-    mock_response.content = b"fake-image-bytes"
+    mock_response.status_code = 200
+    mock_response.headers = {}
+    mock_response.iter_content.return_value = [b"fake-image-bytes"]
     mock_response.raise_for_status = MagicMock()
     with patch("common.multimodal_embeddings.requests.get", return_value=mock_response) as mock_get:
       result = _download_image("https://example.com/photo.jpg")
@@ -80,16 +97,52 @@ class TestDownloadImage:
       mock_get.assert_called_once()
       assert mock_get.call_args.args == ("https://example.com/photo.jpg",)
       assert mock_get.call_args.kwargs["timeout"] == 15
+      assert mock_get.call_args.kwargs["allow_redirects"] is False
+      assert mock_get.call_args.kwargs["stream"] is True
 
-  def test_network_failure_raises_image_download_error(self):
+  def test_network_failure_raises_image_download_error(self, monkeypatch):
+    self._allow_public_dns(monkeypatch)
     with patch("common.multimodal_embeddings.requests.get", side_effect=requests.ConnectionError("network down")):
       with pytest.raises(ImageDownloadError, match="Failed to download image"):
+        _download_image("https://example.com/photo.jpg")
+
+  def test_rejects_private_target_before_request(self, monkeypatch):
+    monkeypatch.setattr(
+      "common.utils.socket.getaddrinfo",
+      lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))],
+    )
+    with patch("common.multimodal_embeddings.requests.get") as mock_get:
+      with pytest.raises(ImageDownloadError, match="publicly routable"):
+        _download_image("http://internal.example/photo.jpg")
+      mock_get.assert_not_called()
+
+  def test_rejects_private_redirect_target(self, monkeypatch):
+    def fake_dns(hostname, *_args, **_kwargs):
+      address = "93.184.216.34" if hostname == "example.com" else "169.254.169.254"
+      return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    monkeypatch.setattr("common.utils.socket.getaddrinfo", fake_dns)
+    redirect = MagicMock(status_code=302, headers={"Location": "http://metadata.example/latest.jpg"})
+    with patch("common.multimodal_embeddings.requests.get", return_value=redirect) as mock_get:
+      with pytest.raises(ImageDownloadError, match="publicly routable"):
+        _download_image("https://example.com/photo.jpg")
+      mock_get.assert_called_once()
+
+  def test_rejects_oversized_stream(self, monkeypatch):
+    self._allow_public_dns(monkeypatch)
+    monkeypatch.setenv("MAX_IMAGE_DOWNLOAD_BYTES", "4")
+    response = MagicMock(status_code=200, headers={})
+    response.iter_content.return_value = [b"123", b"45"]
+    with patch("common.multimodal_embeddings.requests.get", return_value=response):
+      with pytest.raises(ImageDownloadError, match="byte download limit"):
         _download_image("https://example.com/photo.jpg")
 
 
 def _mock_download(content: bytes = b"fake-image-bytes") -> MagicMock:
   response = MagicMock()
-  response.content = content
+  response.status_code = 200
+  response.headers = {}
+  response.iter_content.return_value = [content]
   response.raise_for_status = MagicMock()
   return response
 

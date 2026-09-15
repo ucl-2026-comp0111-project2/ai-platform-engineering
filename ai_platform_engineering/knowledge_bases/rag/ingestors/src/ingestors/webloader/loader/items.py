@@ -6,7 +6,9 @@ by pipelines and converted to LangChain Documents.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
+
+
 @dataclass
 class ScrapedPageItem:
   """
@@ -24,6 +26,7 @@ class ScrapedPageItem:
   generator: Optional[str] = None
   extra_metadata: Dict[str, Any] = field(default_factory=dict)
   images: List[Dict[str, Any]] = field(default_factory=list)
+
   def to_dict(self) -> Dict[str, Any]:
     """Convert to dictionary for pipeline processing."""
     return {

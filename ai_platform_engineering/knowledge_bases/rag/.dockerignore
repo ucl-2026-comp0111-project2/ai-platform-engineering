@@ -2,6 +2,9 @@
 .venv/
 venv/
 env/
+**/.venv/
+**/venv/
+**/env/
 
 # Python cache files
 __pycache__/
@@ -51,4 +54,4 @@ docs/_build/
 web/node_modules/
 web/dist/
 web/.next/
-web/build/ 
+web/build/

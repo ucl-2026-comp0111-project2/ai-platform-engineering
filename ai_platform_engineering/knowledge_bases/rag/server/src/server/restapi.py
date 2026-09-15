@@ -105,7 +105,7 @@ clean_up_interval = int(os.getenv("CLEANUP_INTERVAL", 3 * 60 * 60))  # Default t
 cleanup_enabled = os.getenv("CLEANUP_ENABLED", "true").lower() in ("true", "1", "yes")
 ontology_agent_client = httpx.AsyncClient(base_url=os.getenv("ONTOLOGY_AGENT_RESTAPI_ADDR", "http://localhost:8098"))
 graph_rag_enabled = os.getenv("ENABLE_GRAPH_RAG", "true").lower() in ("true", "1", "yes")
-image_embedding_enabled = os.getenv("ENABLE_IMAGE_EMBEDDING", "true").lower() in ("true", "1", "yes")
+image_embedding_enabled = os.getenv("ENABLE_IMAGE_EMBEDDING", "false").lower() in ("true", "1", "yes")
 
 
 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -127,7 +127,7 @@ max_results_per_query = int(os.getenv("MAX_RESULTS_PER_QUERY", 100))  # max resu
 confluence_url = os.getenv("CONFLUENCE_URL")  # optional - base URL for Confluence instance (e.g., https://company.atlassian.net/wiki)
 
 default_collection_name_docs = "rag_default"
-default_collection_name_images = "rag_images"
+default_collection_name_images = os.getenv("IMAGE_COLLECTION_NAME", "rag_images")
 
 dense_index_params = {"index_type": "HNSW", "metric_type": "COSINE"}
 sparse_index_params = {"index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25"}

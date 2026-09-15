@@ -46,7 +46,12 @@ def _make_doc(source: str, images) -> Document:
     return Document(page_content="some page text", metadata={"metadata": nested})
 
 
-def _image_id(url: str) -> str:
+def _image_id(url: str, datasource_id: str = "ds-1") -> str:
+    scoped_value = f"{datasource_id}\0{url}"
+    return f"img_{hashlib.md5(scoped_value.encode()).hexdigest()[:12]}"
+
+
+def _legacy_image_id(url: str) -> str:
     return f"img_{hashlib.md5(url.encode()).hexdigest()[:12]}"
 
 
@@ -65,6 +70,16 @@ class TestIngestImages:
         image_vstore = _make_image_vstore()
         processor = _make_processor(image_vstore=image_vstore)
         doc = _make_doc("https://example.com/page", images=[])
+
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
+
+        image_vstore.aadd_embeddings.assert_not_awaited()
+
+    @pytest.mark.parametrize("images", ["not-json", '{"url": "https://example.com/image.jpg"}'])
+    async def test_malformed_or_non_list_image_metadata_is_ignored(self, images):
+        image_vstore = _make_image_vstore()
+        processor = _make_processor(image_vstore=image_vstore)
+        doc = _make_doc("https://example.com/page", images=images)
 
         await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
 
@@ -99,6 +114,71 @@ class TestIngestImages:
         image_vstore.aadd_embeddings.assert_awaited_once()
         call_kwargs = image_vstore.aadd_embeddings.call_args.kwargs
         assert call_kwargs["metadatas"][0][DATASOURCE_ID_KEY] == "ds-42"
+        assert call_kwargs["ids"] == [_image_id(image_url, "ds-42")]
+
+    async def test_ingested_image_is_tagged_with_embedding_provider(self):
+        image_vstore = _make_image_vstore()
+
+        class TestMultimodalEmbedder:
+            def embed_image_url(self, _url):
+                return [0.1, 0.2, 0.3]
+
+        image_vstore.embeddings.embedder = TestMultimodalEmbedder()
+        processor = _make_processor(image_vstore=image_vstore)
+        doc = _make_doc(
+            "https://example.com/page",
+            images=[{"url": "https://example.com/diagram.png", "alt_text": "A diagram"}],
+        )
+
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-42")
+
+        metadata = image_vstore.aadd_embeddings.call_args.kwargs["metadatas"][0]
+        assert metadata["embedding_provider"] == "TestMultimodalEmbedder"
+
+    async def test_legacy_url_only_record_does_not_block_datasource_scoped_reingestion(self):
+        image_url = "https://example.com/legacy-diagram.png"
+        image_vstore = _make_image_vstore(existing_ids=[_legacy_image_id(image_url)])
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2, 0.3])
+        processor = _make_processor(image_vstore=image_vstore)
+        doc = _make_doc("https://example.com/page", images=[{"url": image_url, "alt_text": "A diagram"}])
+
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-42")
+
+        image_vstore.aadd_embeddings.assert_awaited_once()
+        call_kwargs = image_vstore.aadd_embeddings.call_args.kwargs
+        assert call_kwargs["ids"] == [_image_id(image_url, "ds-42")]
+        assert call_kwargs["metadatas"][0][DATASOURCE_ID_KEY] == "ds-42"
+
+    async def test_same_url_is_stored_separately_for_different_datasources(self):
+        image_url = "https://example.com/shared-logo.png"
+        image_vstore = _make_image_vstore()
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2, 0.3])
+        processor = _make_processor(image_vstore=image_vstore)
+        doc = _make_doc("https://example.com/page", images=[{"url": image_url, "alt_text": "Shared logo"}])
+
+        await processor._ingest_images(documents=[doc], job_id="job-1", datasource_id="ds-1")
+        await processor._ingest_images(documents=[doc], job_id="job-2", datasource_id="ds-2")
+
+        first_id = image_vstore.aadd_embeddings.await_args_list[0].kwargs["ids"][0]
+        second_id = image_vstore.aadd_embeddings.await_args_list[1].kwargs["ids"][0]
+        assert first_id == _image_id(image_url, "ds-1")
+        assert second_id == _image_id(image_url, "ds-2")
+        assert first_id != second_id
+
+    async def test_repeated_url_within_one_batch_is_embedded_once(self):
+        image_url = "https://example.com/shared-logo.png"
+        image_vstore = _make_image_vstore()
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(return_value=[0.1, 0.2, 0.3])
+        processor = _make_processor(image_vstore=image_vstore)
+        documents = [
+            _make_doc("https://example.com/page-one", images=[{"url": image_url, "alt_text": "Logo"}]),
+            _make_doc("https://example.com/page-two", images=[{"url": image_url, "alt_text": "Logo"}]),
+        ]
+
+        await processor._ingest_images(documents=documents, job_id="job-1", datasource_id="ds-1")
+
+        image_vstore.embeddings.embedder.embed_image_url.assert_called_once_with(image_url)
+        assert image_vstore.aadd_embeddings.call_args.kwargs["ids"] == [_image_id(image_url)]
 
     async def test_already_stored_image_is_skipped(self):
         image_url = "https://example.com/ant.jpg"

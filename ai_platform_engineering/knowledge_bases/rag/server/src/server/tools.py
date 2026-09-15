@@ -109,7 +109,7 @@ class AgentTools:
       description = self._build_search_description(self._DEFAULT_SEARCH_CONFIG, graph_rag_enabled)
       mcp.tool(name_or_fn=fn, description=description)
 
-    if os.getenv("ENABLE_IMAGE_EMBEDDING", "true").lower() in ("true", "1", "yes"):
+    if os.getenv("ENABLE_IMAGE_EMBEDDING", "false").lower() in ("true", "1", "yes"):
       mcp.tool(self.search_images)
 
     # Register each enabled custom search tool (skip reserved/built-in names)
