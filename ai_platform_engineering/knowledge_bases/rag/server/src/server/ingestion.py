@@ -5,6 +5,7 @@ import time
 import json
 import traceback
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 from common import utils
 
 from common.multimodal_embeddings import UnsupportedImageFormatError
@@ -23,6 +24,22 @@ IMAGE_EMBED_CONCURRENCY = int(os.getenv("IMAGE_EMBED_CONCURRENCY", "5"))
 # Max attempts per image before giving up (covers transient network/API errors)
 IMAGE_EMBED_MAX_ATTEMPTS = int(os.getenv("IMAGE_EMBED_MAX_ATTEMPTS", "3"))
 IMAGE_EMBED_RETRY_DELAY_SECONDS = float(os.getenv("IMAGE_EMBED_RETRY_DELAY_SECONDS", "1.0"))
+
+
+def _safe_image_source_label(source: str) -> str:
+  """Remove credentials, query parameters, and fragments from logged image URLs."""
+  parsed = urlparse(source)
+  if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    return source
+  host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+  try:
+    port = parsed.port
+  except ValueError:
+    port = None
+  if port:
+    host = f"{host}:{port}"
+  return parsed._replace(netloc=host, query="", fragment="").geturl()
+
 
 class DocumentProcessor:
   # Milvus varchar field limit (65535 bytes, using 60000 to be safe with UTF-8 encoding)
@@ -905,7 +922,7 @@ class DocumentProcessor:
       source_url = nested_metadata.get("source", "")
 
       if len(images) > MAX_IMAGES_PER_DOCUMENT:
-        self.logger.info(f"Capping images for {source_url or 'unknown'}: {len(images)} found, embedding first {MAX_IMAGES_PER_DOCUMENT}")
+        self.logger.info(f"Capping images for {_safe_image_source_label(source_url) if source_url else 'unknown'}: {len(images)} found, embedding first {MAX_IMAGES_PER_DOCUMENT}")
         images = images[:MAX_IMAGES_PER_DOCUMENT]
 
       for image in images:
@@ -993,11 +1010,11 @@ class DocumentProcessor:
       try:
         return embedder.embed_image_url(url)
       except UnsupportedImageFormatError as e:
-        self.logger.warning(f"Skipping unsupported image format: {url} ({e})")
+        self.logger.warning(f"Skipping unsupported image format: {_safe_image_source_label(url)} ({e})")
         return None
       except Exception as e:
         if attempt >= IMAGE_EMBED_MAX_ATTEMPTS:
-          self.logger.warning(f"Failed to embed image {url} after {attempt} attempts: {e}")
+          self.logger.warning(f"Failed to embed image {_safe_image_source_label(url)} after {attempt} attempts: {type(e).__name__}")
           return None
         time.sleep(IMAGE_EMBED_RETRY_DELAY_SECONDS)
     return None

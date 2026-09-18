@@ -450,4 +450,3 @@ def _rerank_text_results(
   for rank, result in enumerate(reranked, 1):
     result.rank = rank
   return reranked
-

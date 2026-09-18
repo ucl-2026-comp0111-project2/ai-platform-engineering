@@ -378,7 +378,7 @@ async def app_lifespan(app: FastAPI):
 
     # setup ingestor with graph db
     ingestor = DocumentProcessor(vstore=vector_db, graph_rag_enabled=graph_rag_enabled, job_manager=jobmanager, data_graph_db=data_graph_db, batch_size=max_documents_per_ingest, image_vstore=image_vector_db)
-  
+
   else:
     # setup ingestor without graph db
     ingestor = DocumentProcessor(vstore=vector_db, job_manager=jobmanager, graph_rag_enabled=graph_rag_enabled, batch_size=max_documents_per_ingest, image_vstore=image_vector_db)

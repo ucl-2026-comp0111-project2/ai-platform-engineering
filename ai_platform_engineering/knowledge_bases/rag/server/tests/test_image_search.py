@@ -439,7 +439,7 @@ def test_search_text_reranks_vector_candidates_with_metadata():
       },
     },
     {
-      "id": "nasa_logo",
+      "id": "example_logo",
       "distance": 0.12,
       "entity": {
         "text": "https://example.com/example-insignia-logo.png",
@@ -458,7 +458,7 @@ def test_search_text_reranks_vector_candidates_with_metadata():
     embedder=FakeEmbedder(),
   )
 
-  assert [result.image_id for result in results] == ["nasa_logo", "plain_text"]
+  assert [result.image_id for result in results] == ["example_logo", "plain_text"]
   assert results[0].metadata_score > results[1].metadata_score
   assert results[0].rerank_score > results[1].rerank_score
 

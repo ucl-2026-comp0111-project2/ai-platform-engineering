@@ -274,6 +274,31 @@ class TestIngestImages:
 
         image_vstore.aadd_embeddings.assert_not_awaited()
 
+    async def test_embedding_failure_does_not_log_url_secrets(self):
+        image_vstore = _make_image_vstore()
+        image_vstore.embeddings.embedder.embed_image_url = MagicMock(
+            side_effect=RuntimeError("persistent failure")
+        )
+        processor = _make_processor(image_vstore=image_vstore)
+        processor.logger = MagicMock()
+        image_url = "https://example.com/pic.jpg?token=private#fragment"
+        doc = _make_doc(
+            "https://example.com/page",
+            images=[{"url": image_url, "alt_text": ""}],
+        )
+
+        with patch("server.ingestion.time.sleep"):
+            await processor._ingest_images(
+                documents=[doc], job_id="job-1", datasource_id="ds-1"
+            )
+
+        warning_text = " ".join(
+            str(call.args[0]) for call in processor.logger.warning.call_args_list
+        )
+        assert "https://example.com/pic.jpg" in warning_text
+        assert "token=private" not in warning_text
+        assert "fragment" not in warning_text
+
     async def test_image_vstore_none_is_never_called(self):
         processor = _make_processor(image_vstore=None)
         assert processor.image_vstore is None
